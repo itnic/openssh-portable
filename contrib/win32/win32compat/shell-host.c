@@ -46,6 +46,8 @@
 #define MAX_CMD_LEN 8191 // msdn
 #define WM_APPEXIT WM_USER+1
 #define MAX_EXPECTED_BUFFER_SIZE 1024
+/* 4KB is the largest size for which writes are guaranteed to be atomic */
+#define BUFF_SIZE 4096
 
 #ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
 #define ENABLE_VIRTUAL_TERMINAL_PROCESSING  0x4
@@ -1263,14 +1265,13 @@ MonitorChild_nopty( _In_ LPVOID lpParameter)
 int 
 start_withno_pty(wchar_t *command)
 {
-	STARTUPINFO si;
+	STARTUPINFO si;	
 	PROCESS_INFORMATION pi;
 	wchar_t *cmd = (wchar_t *) malloc(sizeof(wchar_t) * MAX_CMD_LEN);
 	SECURITY_ATTRIBUTES sa;
 	BOOL ret, process_input = FALSE, run_under_cmd = FALSE;
-	size_t command_len;
-	DWORD buffer_size = 128;
-	char buf[buffer_size] = {0,};
+	size_t command_len;	
+	char buf[BUFF_SIZE+1];
 	DWORD rd = 0, wr = 0, i = 0;
 
 	if (cmd == NULL) {
@@ -1288,7 +1289,8 @@ start_withno_pty(wchar_t *command)
 
 	memset(&sa, 0, sizeof(SECURITY_ATTRIBUTES));
 	sa.bInheritHandle = TRUE;
-	if (!CreatePipe(&child_pipe_read, &child_pipe_write, &sa, buffer_size))
+	/* use the default buffer size, 64K*/
+	if (!CreatePipe(&child_pipe_read, &child_pipe_write, &sa, 0))
 		return -1;
 
 	memset(&si, 0, sizeof(STARTUPINFO));
@@ -1321,10 +1323,10 @@ start_withno_pty(wchar_t *command)
 		process_input = TRUE;
 	else {
 		command_len = wcsnlen_s(command, MAX_CMD_LEN);
-		if ((command_len >= 3 && wcsnicmp(command, L"cmd", 4) == 0) ||
-		    (command_len >= 7 && wcsnicmp(command, L"cmd.exe", 8) == 0) ||
-		    (command_len >= 4 && wcsnicmp(command, L"cmd ", 4) == 0) ||
-		    (command_len >= 8 && wcsnicmp(command, L"cmd.exe ", 8) == 0))
+		if ((command_len >= 3 && _wcsnicmp(command, L"cmd", 4) == 0) ||
+		    (command_len >= 7 && _wcsnicmp(command, L"cmd.exe", 8) == 0) ||
+		    (command_len >= 4 && _wcsnicmp(command, L"cmd ", 4) == 0) ||
+		    (command_len >= 8 && _wcsnicmp(command, L"cmd.exe ", 8) == 0))
 			process_input = TRUE;
 	}
 
@@ -1371,8 +1373,8 @@ start_withno_pty(wchar_t *command)
 	/* process data from pipe_in and route appropriately */
 	while (1) {
 		rd = wr = i = 0;
-		buf[buffer_size] = {0,};
-		GOTO_CLEANUP_ON_FALSE(ReadFile(pipe_in, buf, buffer_size-1, &rd, NULL));
+		memset(buf, L'\0', BUFF_SIZE+1);
+		GOTO_CLEANUP_ON_FALSE(ReadFile(pipe_in, buf, BUFF_SIZE, &rd, NULL));
 
 		if (process_input == FALSE) {
 			/* write stream directly to child stdin */
