@@ -1173,8 +1173,7 @@ start_with_pty(wchar_t *command)
 	GOTO_CLEANUP_ON_ERR(wcscat_s(cmd, MAX_CMD_LEN, w32_cmd_path()));
 	
 	if (command) {
-		GOTO_CLEANUP_ON_ERR(wcscat_s(cmd, MAX_CMD_LEN, L" /c"));
-		GOTO_CLEANUP_ON_ERR(wcscat_s(cmd, MAX_CMD_LEN, L" "));
+		GOTO_CLEANUP_ON_ERR(wcscat_s(cmd, MAX_CMD_LEN, L" /c "));		
 		GOTO_CLEANUP_ON_ERR(wcscat_s(cmd, MAX_CMD_LEN, command));
 	}
 
@@ -1269,7 +1268,8 @@ start_withno_pty(wchar_t *command)
 	SECURITY_ATTRIBUTES sa;
 	BOOL ret, process_input = FALSE, run_under_cmd = FALSE;
 	size_t command_len;
-	char buf[128];
+	DWORD buffer_size = 128;
+	char buf[buffer_size] = {0,};
 	DWORD rd = 0, wr = 0, i = 0;
 
 	if (cmd == NULL) {
@@ -1287,7 +1287,7 @@ start_withno_pty(wchar_t *command)
 
 	memset(&sa, 0, sizeof(SECURITY_ATTRIBUTES));
 	sa.bInheritHandle = TRUE;
-	if (!CreatePipe(&child_pipe_read, &child_pipe_write, &sa, 128))
+	if (!CreatePipe(&child_pipe_read, &child_pipe_write, &sa, buffer_size))
 		return -1;
 
 	memset(&si, 0, sizeof(STARTUPINFO));
@@ -1320,16 +1320,16 @@ start_withno_pty(wchar_t *command)
 		process_input = TRUE;
 	else {
 		command_len = wcsnlen_s(command, MAX_CMD_LEN);
-		if ((command_len >= 3 && wcsncmp(command, L"cmd", 4) == 0) ||
-		    (command_len >= 7 && wcsncmp(command, L"cmd.exe", 8) == 0) ||
-		    (command_len >= 4 && wcsncmp(command, L"cmd ", 4) == 0) ||
-		    (command_len >= 8 && wcsncmp(command, L"cmd.exe ", 8) == 0))
+		if ((command_len >= 3 && wcsnicmp(command, L"cmd", 4) == 0) ||
+		    (command_len >= 7 && wcsnicmp(command, L"cmd.exe", 8) == 0) ||
+		    (command_len >= 4 && wcsnicmp(command, L"cmd ", 4) == 0) ||
+		    (command_len >= 8 && wcsnicmp(command, L"cmd.exe ", 8) == 0))
 			process_input = TRUE;
 	}
 
 	/* Try launching command as is first */
-	if (command) {
-		ret = CreateProcessW(NULL, command, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+	if (command) {		
+		ret = CreateProcessW(NULL, command, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi); 
 		if (ret == FALSE) {
 			/* it was probably this case - ssh user@target dir */
 			if (GetLastError() == ERROR_FILE_NOT_FOUND)
@@ -1346,8 +1346,7 @@ start_withno_pty(wchar_t *command)
 		cmd[0] = L'\0';
 		GOTO_CLEANUP_ON_ERR(wcscat_s(cmd, MAX_CMD_LEN, w32_cmd_path()));
 		if (command) {
-			GOTO_CLEANUP_ON_ERR(wcscat_s(cmd, MAX_CMD_LEN, L" /c"));
-			GOTO_CLEANUP_ON_ERR(wcscat_s(cmd, MAX_CMD_LEN, L" "));
+			GOTO_CLEANUP_ON_ERR(wcscat_s(cmd, MAX_CMD_LEN, L" /c "));			
 			GOTO_CLEANUP_ON_ERR(wcscat_s(cmd, MAX_CMD_LEN, command));
 		}
 	
@@ -1371,7 +1370,8 @@ start_withno_pty(wchar_t *command)
 	/* process data from pipe_in and route appropriately */
 	while (1) {
 		rd = wr = i = 0;
-		GOTO_CLEANUP_ON_FALSE(ReadFile(pipe_in, buf, sizeof(buf)-1, &rd, NULL));
+		buf[buffer_size] = {0,};
+		GOTO_CLEANUP_ON_FALSE(ReadFile(pipe_in, buf, buffer_size-1, &rd, NULL));
 
 		if (process_input == FALSE) {
 			/* write stream directly to child stdin */
@@ -1413,12 +1413,10 @@ start_withno_pty(wchar_t *command)
 
 			/* For CR and LF */
 			if ((buf[i] == '\r') || (buf[i] == '\n')) {
-				/* TODO - do a much accurate mapping */
-				GOTO_CLEANUP_ON_FALSE(WriteFile(pipe_out, buf + i, 1, &wr, NULL));
-				if ((buf[i] == '\r') && ((i == rd - 1) || (buf[i + 1] != '\n'))) {
+				/* TODO - do a much accurate mapping */				
+				if ((buf[i] == '\r') && ((i == rd - 1) || (buf[i + 1] != '\n')))
 					buf[i] = '\n';
-					GOTO_CLEANUP_ON_FALSE(WriteFile(pipe_out, buf + i, 1, &wr, NULL));
-				}
+				GOTO_CLEANUP_ON_FALSE(WriteFile(pipe_out, buf + i, 1, &wr, NULL));
 				in_cmd[in_cmd_len] = buf[i];
 				in_cmd_len++;
 				GOTO_CLEANUP_ON_FALSE(WriteFile(child_pipe_write, in_cmd, in_cmd_len, &wr, NULL));
