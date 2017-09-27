@@ -1111,7 +1111,7 @@ start_with_pty(wchar_t *command)
 	DWORD dwStatus;
 	HANDLE hEventHook = NULL;
 	HMODULE hm_kernel32 = NULL, hm_user32 = NULL;
-	wchar_t kernel32_dll_path[PATH_MAX]={0,}, user32_dll_path[PATH_MAX]={0,};	
+	wchar_t kernel32_dll_path[PATH_MAX]={0,}, user32_dll_path[PATH_MAX]={0,};
 
 	GOTO_CLEANUP_ON_ERR(wcsncpy_s(kernel32_dll_path, _countof(kernel32_dll_path), system32_path, wcsnlen(system32_path, _countof(system32_path)) + 1));
 	GOTO_CLEANUP_ON_ERR(wcscat_s(kernel32_dll_path, _countof(kernel32_dll_path), L"\\kernel32.dll"));
@@ -1258,14 +1258,14 @@ MonitorChild_nopty( _In_ LPVOID lpParameter)
 int 
 start_withno_pty(wchar_t *command)
 {
-	STARTUPINFO si;	
+	STARTUPINFO si;
 	PROCESS_INFORMATION pi;
 	wchar_t cmd[MAX_CMD_LEN]= {L'\0',};
 	SECURITY_ATTRIBUTES sa;
 	BOOL ret, process_input = FALSE, run_under_cmd = FALSE;
-	size_t command_len;	
+	size_t command_len;
 	char buf[BUFF_SIZE+1];
-	DWORD rd = 0, wr = 0, i = 0;	
+	DWORD rd = 0, wr = 0, i = 0;
 
 	pipe_in = GetStdHandle(STD_INPUT_HANDLE);
 	pipe_out = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -1322,8 +1322,8 @@ start_withno_pty(wchar_t *command)
 
 	/* Try launching command as is first */
 	if (command) {
-		ret = CreateProcessW(NULL, command, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi); 
-		if (ret == FALSE) {			
+		ret = CreateProcessW(NULL, command, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+		if (ret == FALSE) {
 			/* it was probably this case - ssh user@target dir */
 			if (GetLastError() == ERROR_FILE_NOT_FOUND)
 				run_under_cmd = TRUE;
