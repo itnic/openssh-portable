@@ -1105,18 +1105,13 @@ start_with_pty(wchar_t *command)
 {
 	STARTUPINFO si;
 	PROCESS_INFORMATION pi;
-	wchar_t *cmd = (wchar_t *)malloc(sizeof(wchar_t) * MAX_CMD_LEN);
+	wchar_t cmd[MAX_CMD_LEN] = {L'\0',};
 	SECURITY_ATTRIBUTES sa;
 	BOOL ret;
 	DWORD dwStatus;
 	HANDLE hEventHook = NULL;
 	HMODULE hm_kernel32 = NULL, hm_user32 = NULL;
-	wchar_t kernel32_dll_path[PATH_MAX]={0,}, user32_dll_path[PATH_MAX]={0,};
-
-	if(cmd == NULL) {
-		printf_s("ssh-shellhost is out of memory");
-		exit(255);
-	}
+	wchar_t kernel32_dll_path[PATH_MAX]={0,}, user32_dll_path[PATH_MAX]={0,};	
 
 	GOTO_CLEANUP_ON_ERR(wcsncpy_s(kernel32_dll_path, _countof(kernel32_dll_path), system32_path, wcsnlen(system32_path, _countof(system32_path)) + 1));
 	GOTO_CLEANUP_ON_ERR(wcscat_s(kernel32_dll_path, _countof(kernel32_dll_path), L"\\kernel32.dll"));
@@ -1267,17 +1262,12 @@ start_withno_pty(wchar_t *command)
 {
 	STARTUPINFO si;	
 	PROCESS_INFORMATION pi;
-	wchar_t *cmd = (wchar_t *) malloc(sizeof(wchar_t) * MAX_CMD_LEN);
+	wchar_t cmd[MAX_CMD_LEN]= {L'\0',};
 	SECURITY_ATTRIBUTES sa;
 	BOOL ret, process_input = FALSE, run_under_cmd = FALSE;
 	size_t command_len;	
 	char buf[BUFF_SIZE+1];
-	DWORD rd = 0, wr = 0, i = 0;
-
-	if (cmd == NULL) {
-		printf_s("ssh-shellhost is out of memory");
-		exit(255);
-	}
+	DWORD rd = 0, wr = 0, i = 0;	
 
 	pipe_in = GetStdHandle(STD_INPUT_HANDLE);
 	pipe_out = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -1290,8 +1280,10 @@ start_withno_pty(wchar_t *command)
 	memset(&sa, 0, sizeof(SECURITY_ATTRIBUTES));
 	sa.bInheritHandle = TRUE;
 	/* use the default buffer size, 64K*/
-	if (!CreatePipe(&child_pipe_read, &child_pipe_write, &sa, 0))
+	if (!CreatePipe(&child_pipe_read, &child_pipe_write, &sa, 0)) {
+		printf_s("ssh-shellhost-can't open no pty session, error: %d", GetLastError());
 		return -1;
+	}
 
 	memset(&si, 0, sizeof(STARTUPINFO));
 	memset(&pi, 0, sizeof(PROCESS_INFORMATION));
@@ -1331,9 +1323,9 @@ start_withno_pty(wchar_t *command)
 	}
 
 	/* Try launching command as is first */
-	if (command) {		
+	if (command) {
 		ret = CreateProcessW(NULL, command, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi); 
-		if (ret == FALSE) {
+		if (ret == FALSE) {			
 			/* it was probably this case - ssh user@target dir */
 			if (GetLastError() == ERROR_FILE_NOT_FOUND)
 				run_under_cmd = TRUE;
@@ -1345,11 +1337,10 @@ start_withno_pty(wchar_t *command)
 		run_under_cmd = TRUE;
 
 	/* if above failed with FILE_NOT_FOUND, try running the provided command under cmd*/
-	if (run_under_cmd) {		
-		cmd[0] = L'\0';
+	if (run_under_cmd) {
 		GOTO_CLEANUP_ON_ERR(wcscat_s(cmd, MAX_CMD_LEN, w32_cmd_path()));
 		if (command) {
-			GOTO_CLEANUP_ON_ERR(wcscat_s(cmd, MAX_CMD_LEN, L" /c "));			
+			GOTO_CLEANUP_ON_ERR(wcscat_s(cmd, MAX_CMD_LEN, L" /c "));
 			GOTO_CLEANUP_ON_ERR(wcscat_s(cmd, MAX_CMD_LEN, command));
 		}
 	
