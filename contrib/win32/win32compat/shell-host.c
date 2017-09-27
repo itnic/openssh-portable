@@ -1105,13 +1105,18 @@ start_with_pty(wchar_t *command)
 {
 	STARTUPINFO si;
 	PROCESS_INFORMATION pi;
-	wchar_t cmd[MAX_CMD_LEN] = {L'\0',};
+	wchar_t *cmd = (wchar_t *)malloc(sizeof(wchar_t) * MAX_CMD_LEN);
 	SECURITY_ATTRIBUTES sa;
 	BOOL ret;
 	DWORD dwStatus;
 	HANDLE hEventHook = NULL;
 	HMODULE hm_kernel32 = NULL, hm_user32 = NULL;
 	wchar_t kernel32_dll_path[PATH_MAX]={0,}, user32_dll_path[PATH_MAX]={0,};
+
+	if (cmd == NULL) {
+		printf_s("ssh-shellhost is out of memory");
+		exit(255);		
+	}
 
 	GOTO_CLEANUP_ON_ERR(wcsncpy_s(kernel32_dll_path, _countof(kernel32_dll_path), system32_path, wcsnlen(system32_path, _countof(system32_path)) + 1));
 	GOTO_CLEANUP_ON_ERR(wcscat_s(kernel32_dll_path, _countof(kernel32_dll_path), L"\\kernel32.dll"));
@@ -1167,6 +1172,7 @@ start_with_pty(wchar_t *command)
 	/* disable inheritance on pipe_in*/
 	GOTO_CLEANUP_ON_FALSE(SetHandleInformation(pipe_in, HANDLE_FLAG_INHERIT, 0));	
 	
+	cmd[0] = L'\0';
 	GOTO_CLEANUP_ON_ERR(wcscat_s(cmd, MAX_CMD_LEN, w32_cmd_path()));	
 	if (command) {
 		GOTO_CLEANUP_ON_ERR(wcscat_s(cmd, MAX_CMD_LEN, L" /c "));		
@@ -1260,13 +1266,17 @@ start_withno_pty(wchar_t *command)
 {
 	STARTUPINFO si;
 	PROCESS_INFORMATION pi;
-	wchar_t cmd[MAX_CMD_LEN]= {L'\0',};
+	wchar_t *cmd = (wchar_t *)malloc(sizeof(wchar_t) * MAX_CMD_LEN);
 	SECURITY_ATTRIBUTES sa;
 	BOOL ret, process_input = FALSE, run_under_cmd = FALSE;
 	size_t command_len;
-	char buf[BUFF_SIZE+1];
+	char *buf = (char *)malloc(BUFF_SIZE + 1);
 	DWORD rd = 0, wr = 0, i = 0;
 
+	if (cmd == NULL) {
+		printf_s("ssh-shellhost is out of memory");
+		exit(255);
+	}
 	pipe_in = GetStdHandle(STD_INPUT_HANDLE);
 	pipe_out = GetStdHandle(STD_OUTPUT_HANDLE);
 	pipe_err = GetStdHandle(STD_ERROR_HANDLE);
@@ -1336,6 +1346,7 @@ start_withno_pty(wchar_t *command)
 
 	/* if above failed with FILE_NOT_FOUND, try running the provided command under cmd*/
 	if (run_under_cmd) {
+		cmd[0] = L'\0';
 		GOTO_CLEANUP_ON_ERR(wcscat_s(cmd, MAX_CMD_LEN, w32_cmd_path()));
 		if (command) {
 			GOTO_CLEANUP_ON_ERR(wcscat_s(cmd, MAX_CMD_LEN, L" /c "));
@@ -1359,10 +1370,14 @@ start_withno_pty(wchar_t *command)
 	/* disable Ctrl+C hander in this process*/
 	SetConsoleCtrlHandler(NULL, TRUE);
 
+	if (buf == NULL) {
+		printf_s("ssh-shellhost is out of memory");
+		exit(255);
+	}
 	/* process data from pipe_in and route appropriately */
 	while (1) {
 		rd = wr = i = 0;
-		memset(buf, L'\0', BUFF_SIZE+1);
+		buf[0] = L'\0';
 		GOTO_CLEANUP_ON_FALSE(ReadFile(pipe_in, buf, BUFF_SIZE, &rd, NULL));
 
 		if (process_input == FALSE) {
@@ -1439,6 +1454,12 @@ cleanup:
 	}		
 	if (!IS_INVALID_HANDLE(child))
 		TerminateProcess(child, 0);
+
+	if (buf != NULL)
+		free(buf);
+
+	if (cmd != NULL)
+		free(cmd);
 	
 	return child_exit_code;
 }
