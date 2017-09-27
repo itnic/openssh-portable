@@ -1115,7 +1115,7 @@ start_with_pty(wchar_t *command)
 
 	if (cmd == NULL) {
 		printf_s("ssh-shellhost is out of memory");
-		exit(255);		
+		exit(255);
 	}
 
 	GOTO_CLEANUP_ON_ERR(wcsncpy_s(kernel32_dll_path, _countof(kernel32_dll_path), system32_path, wcsnlen(system32_path, _countof(system32_path)) + 1));
@@ -1170,7 +1170,7 @@ start_with_pty(wchar_t *command)
 	si.cb = sizeof(STARTUPINFO);
 	si.dwFlags = 0;
 	/* disable inheritance on pipe_in*/
-	GOTO_CLEANUP_ON_FALSE(SetHandleInformation(pipe_in, HANDLE_FLAG_INHERIT, 0));	
+	GOTO_CLEANUP_ON_FALSE(SetHandleInformation(pipe_in, HANDLE_FLAG_INHERIT, 0));
 	
 	cmd[0] = L'\0';
 	GOTO_CLEANUP_ON_ERR(wcscat_s(cmd, MAX_CMD_LEN, w32_cmd_path()));	
