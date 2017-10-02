@@ -324,7 +324,7 @@ createFile_flags_setup(int flags, u_short mode, struct createFile_flags* cf_flag
 	}
 
 	/*validate mode*/
-	if (mode & ~(S_IRWXU | S_IRWXG | S_IRWXO)) {
+	if (mode & ~(S_IRWXU | S_IRWXG | S_IRWXO | S_IFREG | S_IFDIR)) {
 		debug3("open - ERROR: unsupported mode: %d", mode);
 		errno = ENOTSUP;
 		return -1;
