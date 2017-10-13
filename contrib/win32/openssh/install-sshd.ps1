@@ -232,6 +232,7 @@ catch {
     catch {	
 	    $types = Add-Type $definition -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
     }
+}
 
 function Add-Privilege
 {
