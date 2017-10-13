@@ -232,7 +232,6 @@ catch {
     catch {	
 	    $types = Add-Type $definition -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
     }
-}
 
 function Add-Privilege
 {
@@ -280,7 +279,12 @@ if(-not (test-path $logsdir -PathType Container))
     $null = New-Item $logsdir -ItemType Directory -Force -ErrorAction Stop
 }
 $acl = Get-Acl -Path $logsdir
-$acl.SetSecurityDescriptorSddlForm("O:BAG:DUD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+# following SDDL implies 
+# - owner - built in Administrators
+# - disabled inheritance
+# - Full access to System
+# - Full access to built in Administrators
+$acl.SetSecurityDescriptorSddlForm("O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
 Set-Acl -Path $logsdir -AclObject $acl
 
 $agentlog = Join-Path $logsdir "ssh-agent.log"
@@ -289,7 +293,6 @@ Set-Acl -Path $agentlog -AclObject $acl
 
 $sshdlog = Join-Path $logsdir "sshd.log"
 if(-not (test-path $sshdlog)){ $null | Set-Content $sshdlog }
-Set-Acl -Path $sshdlog -AclObject $acl
 $rights = [System.Security.AccessControl.FileSystemRights]"Read, Write"
 $accessRule = New-Object System.Security.AccessControl.FileSystemAccessRule($sshdAccount, $rights, "None", "None", "Allow")
 $acl.SetAccessRule($accessRule)
