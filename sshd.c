@@ -1129,6 +1129,136 @@ server_listen(void)
 		fatal("Cannot bind any address.");
 }
 
+static int
+process_connection(int *sock_in, int* sock_out, int *newsock, int *config_s, int *startup_p)
+{
+	int pid;
+	u_char rnd[256];
+	
+	if (debug_flag) {
+		/*
+		* In debugging mode.  Close the listening
+		* socket, and start processing the
+		* connection without forking.
+		*/
+		debug("Server will not fork when running in debugging mode.");
+		close_listen_socks();
+		*sock_in = *newsock;
+		*sock_out = *newsock;
+		close(startup_p[0]);
+		close(startup_p[1]);
+		startup_pipe = -1;
+		if (rexec_flag) {
+			send_rexec_state(config_s[0],
+				&cfg);
+			close(config_s[0]);
+		}
+	}
+	else {
+		/*
+		* Normal production daemon.  Fork, and have
+		* the child process the connection. The
+		* parent continues listening.
+		*/
+		platform_pre_fork();
+		
+		if ((pid = fork()) == 0) {
+			/*
+			* Child.  Close the listening and
+			* max_startup sockets.  Start using
+			* the accepted socket. Reinitialize
+			* logging (since our pid has changed).
+			* We break out of the loop to handle
+			* the connection.
+			*/
+			platform_post_fork_child();
+			startup_pipe = startup_p[1];
+			close_startup_pipes();
+			close_listen_socks();
+			*sock_in = *newsock;
+			*sock_out = *newsock;
+			log_init(__progname,
+				options.log_level,
+				options.log_facility,
+				log_stderr);
+			if (rexec_flag)
+				close(config_s[0]);
+
+		} else {
+			/* Parent */
+			platform_post_fork_parent(pid);
+			if (pid < 0)
+				error("fork: %.100s", strerror(errno));
+			else
+				debug("Forked child %ld.", (long)pid);
+
+			close(startup_p[1]);
+
+			if (rexec_flag) {
+				send_rexec_state(config_s[0], &cfg);
+				close(config_s[0]);
+				close(config_s[1]);
+			}
+			close(*newsock);
+
+			/*
+			* Ensure that our random state differs
+			* from that of the child
+			*/
+			arc4random_stir();
+			arc4random_buf(rnd, sizeof(rnd));
+#ifdef WITH_OPENSSL
+			RAND_seed(rnd, sizeof(rnd));
+			if ((RAND_bytes((u_char *)rnd, 1)) != 1)
+				fatal("%s: RAND_bytes failed", __func__);
+#endif
+			explicit_bzero(rnd, sizeof(rnd));
+			return 1;
+		}
+	}
+
+	if (rexec_flag) {
+		int fd;
+
+		debug("rexec start in %d out %d newsock %d pipe %d sock %d",
+			*sock_in, *sock_out, *newsock, startup_pipe, config_s[0]);
+		dup2(*newsock, STDIN_FILENO);
+		dup2(STDIN_FILENO, STDOUT_FILENO);
+		if (startup_pipe == -1)
+			close(REEXEC_STARTUP_PIPE_FD);
+		else if (startup_pipe != REEXEC_STARTUP_PIPE_FD) {
+			dup2(startup_pipe, REEXEC_STARTUP_PIPE_FD);
+			close(startup_pipe);
+			startup_pipe = REEXEC_STARTUP_PIPE_FD;
+		}
+
+		dup2(config_s[1], REEXEC_CONFIG_PASS_FD);
+		close(config_s[1]);
+
+		execv(rexec_argv[0], rexec_argv);
+
+		/* Reexec has failed, fall back and continue */
+		error("rexec of %s failed: %s", rexec_argv[0], strerror(errno));
+		recv_rexec_state(REEXEC_CONFIG_PASS_FD, NULL);
+		log_init(__progname, options.log_level,
+			options.log_facility, log_stderr);
+
+		/* Clean up fds */
+		close(REEXEC_CONFIG_PASS_FD);
+		*newsock = *sock_out = *sock_in = dup(STDIN_FILENO);
+		if ((fd = open(_PATH_DEVNULL, O_RDWR, 0)) != -1) {
+			dup2(fd, STDIN_FILENO);
+			dup2(fd, STDOUT_FILENO);
+			if (fd > STDERR_FILENO)
+				close(fd);
+		}
+		debug("rexec cleanup in %d out %d newsock %d pipe %d sock %d",
+			*sock_in, *sock_out, *newsock, startup_pipe, config_s[0]);
+	}
+	
+	return 0;
+}
+
 /*
  * The main TCP accept loop. Note that, for the non-debug case, returns
  * from this function are in a forked subprocess.
@@ -1142,8 +1272,6 @@ server_accept_loop(int *sock_in, int *sock_out, int *newsock, int *config_s)
 	int startup_p[2] = { -1 , -1 };
 	struct sockaddr_storage from;
 	socklen_t fromlen;
-	pid_t pid;
-	u_char rnd[256];
 
 	/* setup fd set for accept */
 	fdset = NULL;
@@ -1257,131 +1385,8 @@ server_accept_loop(int *sock_in, int *sock_out, int *newsock, int *config_s)
 					break;
 				}
 
-			/*
-			 * Got connection.  Fork a child to handle it, unless
-			 * we are in debugging mode.
-			 */
-			if (debug_flag) {
-				/*
-				 * In debugging mode.  Close the listening
-				 * socket, and start processing the
-				 * connection without forking.
-				 */
-				debug("Server will not fork when running in debugging mode.");
-				close_listen_socks();
-				*sock_in = *newsock;
-				*sock_out = *newsock;
-				close(startup_p[0]);
-				close(startup_p[1]);
-				startup_pipe = -1;
-				pid = getpid();
-				if (rexec_flag) {
-					send_rexec_state(config_s[0],
-					    &cfg);
-					close(config_s[0]);
-				}
+			if (process_connection(sock_in, sock_out, newsock, config_s, startup_p) == 0)
 				break;
-			}
-
-			/*
-			 * Normal production daemon.  Fork, and have
-			 * the child process the connection. The
-			 * parent continues listening.
-			 */
-			platform_pre_fork();
-#ifdef WINDOWS
-			/* 
-			* fork() repleacement for Windows -
-			* - Put accepted socket in a env varaibale
-			* - disable inheritance on listening socket and startup fds
-			* - Spawn child sshd.exe
-			*/
-			{
-				char* path_utf8 = utf16_to_utf8(GetCommandLineW());
-				/* large enough to hold pointer value in hex */
-				char fd_handle[30];  
-
-				if (path_utf8 == NULL)
-					fatal("Failed to alloc memory");
-				
-				if (snprintf(fd_handle, sizeof(fd_handle), "%p", 
-					w32_fd_to_handle(*newsock)) == -1
-				    || SetEnvironmentVariable("SSHD_REMSOC", fd_handle) == FALSE
-				    || snprintf(fd_handle, sizeof(fd_handle), "%p", 
-					w32_fd_to_handle(startup_p[1])) == -1
-				    || SetEnvironmentVariable("SSHD_STARTUPSOC", fd_handle) == FALSE
-				    || fcntl(startup_p[0], F_SETFD, FD_CLOEXEC) == -1) {
-					error("unable to set environment for child");
-					close(*newsock);
-					/* 
-					 * close child end of startup pipe. parent end will 
-					 * automatically be cleaned up on next iteration
-					 */
-					close(startup_p[1]);
-					free(path_utf8);
-					continue;
-				}
-                
-				pid = spawn_child(path_utf8, NULL, STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO, CREATE_NEW_PROCESS_GROUP);
-				free(path_utf8);
-				close(*newsock);
-				SetEnvironmentVariable("SSHD_REMSOC", NULL);
-				SetEnvironmentVariable("SSHD_STARTUPSOC", NULL);
-			}
-#else /* !WINDOWS */
-
-			if ((pid = fork()) == 0) {
-				/*
-				 * Child.  Close the listening and
-				 * max_startup sockets.  Start using
-				 * the accepted socket. Reinitialize
-				 * logging (since our pid has changed).
-				 * We break out of the loop to handle
-				 * the connection.
-				 */
-				platform_post_fork_child();
-				startup_pipe = startup_p[1];
-				close_startup_pipes();
-				close_listen_socks();
-				*sock_in = *newsock;
-				*sock_out = *newsock;
-				log_init(__progname,
-				    options.log_level,
-				    options.log_facility,
-				    log_stderr);
-				if (rexec_flag)
-					close(config_s[0]);
-				break;
-			}
-#endif /* !WINDOWS */
-			/* Parent.  Stay in the loop. */
-			platform_post_fork_parent(pid);
-			if (pid < 0)
-				error("fork: %.100s", strerror(errno));
-			else
-				debug("Forked child %ld.", (long)pid);
-
-			close(startup_p[1]);
-
-			if (rexec_flag) {
-				send_rexec_state(config_s[0], &cfg);
-				close(config_s[0]);
-				close(config_s[1]);
-			}
-			close(*newsock);
-
-			/*
-			 * Ensure that our random state differs
-			 * from that of the child
-			 */
-			arc4random_stir();
-			arc4random_buf(rnd, sizeof(rnd));
-#ifdef WITH_OPENSSL
-			RAND_seed(rnd, sizeof(rnd));
-			if ((RAND_bytes((u_char *)rnd, 1)) != 1)
-				fatal("%s: RAND_bytes failed", __func__);
-#endif
-			explicit_bzero(rnd, sizeof(rnd));
 		}
 
 		/* child process check (or debug mode) */
@@ -1965,27 +1970,6 @@ main(int ac, char **av)
 			}
 		}
 
-#ifdef WINDOWS
-      /* Windows - for sshd child, pick up the accepted socket*/
-      if (is_child) {
-		char *stopstring;
-		DWORD_PTR handle;
-
-		handle = strtol(getenv("SSHD_REMSOC"), &stopstring, 16);
-		SetEnvironmentVariable("SSHD_REMSOC", NULL);
-		debug("child socket: %d", handle);
-		sock_in = sock_out = newsock = w32_allocate_fd_for_handle((HANDLE)handle, TRUE);
-		fcntl(newsock, F_SETFD, FD_CLOEXEC);
-
-		handle = strtol(getenv("SSHD_STARTUPSOC"), &stopstring, 16);
-		SetEnvironmentVariable("SSHD_STARTUPSOC", NULL);
-		debug("child startup_pipe: %d", handle); 
-		startup_pipe = w32_allocate_fd_for_handle((HANDLE)handle, FALSE);		
-		fcntl(startup_pipe, F_SETFD, FD_CLOEXEC);
-      }
-	  else /* Windows and Unix sshd parent */
-#endif /* WINDOWS */
-
 		/* Accept a connection and return in a forked child */
 		server_accept_loop(&sock_in, &sock_out,
 		    &newsock, config_s);
@@ -2008,45 +1992,6 @@ main(int ac, char **av)
 	if (!debug_flag && !inetd_flag && setsid() < 0)
 		error("setsid: %.100s", strerror(errno));
 #endif
-
-	if (rexec_flag) {
-		int fd;
-
-		debug("rexec start in %d out %d newsock %d pipe %d sock %d",
-		    sock_in, sock_out, newsock, startup_pipe, config_s[0]);
-		dup2(newsock, STDIN_FILENO);
-		dup2(STDIN_FILENO, STDOUT_FILENO);
-		if (startup_pipe == -1)
-			close(REEXEC_STARTUP_PIPE_FD);
-		else if (startup_pipe != REEXEC_STARTUP_PIPE_FD) {
-			dup2(startup_pipe, REEXEC_STARTUP_PIPE_FD);
-			close(startup_pipe);
-			startup_pipe = REEXEC_STARTUP_PIPE_FD;
-		}
-
-		dup2(config_s[1], REEXEC_CONFIG_PASS_FD);
-		close(config_s[1]);
-
-		execv(rexec_argv[0], rexec_argv);
-
-		/* Reexec has failed, fall back and continue */
-		error("rexec of %s failed: %s", rexec_argv[0], strerror(errno));
-		recv_rexec_state(REEXEC_CONFIG_PASS_FD, NULL);
-		log_init(__progname, options.log_level,
-		    options.log_facility, log_stderr);
-
-		/* Clean up fds */
-		close(REEXEC_CONFIG_PASS_FD);
-		newsock = sock_out = sock_in = dup(STDIN_FILENO);
-		if ((fd = open(_PATH_DEVNULL, O_RDWR, 0)) != -1) {
-			dup2(fd, STDIN_FILENO);
-			dup2(fd, STDOUT_FILENO);
-			if (fd > STDERR_FILENO)
-				close(fd);
-		}
-		debug("rexec cleanup in %d out %d newsock %d pipe %d sock %d",
-		    sock_in, sock_out, newsock, startup_pipe, config_s[0]);
-	}
 
 	/* Executed child processes don't need these. */
 	fcntl(sock_out, F_SETFD, FD_CLOEXEC);
