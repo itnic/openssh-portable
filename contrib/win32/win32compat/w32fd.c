@@ -68,6 +68,64 @@ HANDLE main_thread;
 
 void fd_table_set(struct w32_io* pio, int index);
 
+struct std_fd_state {
+	int num_inherited;
+	char in_type;
+	char out_type;
+	char err_type;
+	char padding;
+};
+
+struct inh_fd_state {
+	int handle;
+	short index;
+	char type;
+	char padding;
+};
+
+static char*
+fd_encode_state(int in, int out, int err)
+{
+	char *buf;
+	int i, num_inherited = 0;
+	struct std_fd_state *std_fd_state;
+	struct inh_fd_state *inh_fd_state, *c;
+
+	/* find count of handles to be inherited */
+	for (i = 0; i < MAX_FDS; i++) {
+		if (FD_ISSET(i, &(fd_table.occupied)))
+			if (i != in && i != out && i != err)
+				num_inherited++;
+	}
+
+	buf = malloc(8 * (1 + num_inherited));
+
+	std_fd_state = (struct std_fd_state *)buf;
+	std_fd_state->num_inherited = num_inherited;
+	std_fd_state->in_type = fd_table.w32_ios[in]->type;
+	std_fd_state->out_type = fd_table.w32_ios[out]->type;
+	std_fd_state->err_type = fd_table.w32_ios[err]->type;
+
+	c = (struct inh_fd_state*)(buf + 8);
+	for (i = 0; i < MAX_FDS; i++) {
+		if (FD_ISSET(i, &(fd_table.occupied)))
+			if (i != in && i != out && i != err) {
+				c->handle = fd_table.w32_ios[i]->handle;
+				c->index = i;
+				c->type = fd_table.w32_ios[i]->type;
+				c++;
+			}				
+	}
+
+	return NULL;
+}
+
+static void
+fd_decode_state()
+{
+
+}
+
 /* initializes mapping table*/
 static int
 fd_table_initialize()
@@ -1002,6 +1060,9 @@ spawn_child(char* cmd, char** argv, int in, int out, int err, unsigned long flag
 	si.hStdOutput = w32_fd_to_handle(out);
 	si.hStdError = w32_fd_to_handle(err);
 	si.dwFlags = STARTF_USESTDHANDLES;
+
+	/* send fd info */
+
 
 	debug3("spawning %ls", cmdline_utf16);
 	if (fd_table.w32_ios[in]->type != NONSOCK_SYNC_FD)
