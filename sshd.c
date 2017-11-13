@@ -162,12 +162,7 @@ int saved_argc;
 
 /* re-exec */
 int rexeced_flag = 0;
-#ifdef WINDOWS
-/* rexec is not applicable in Windows */
-int rexec_flag = 0;
-#else /* !WINDOWS */
 int rexec_flag = 1;
-#endif /* !WINDOWS */
 int rexec_argc = 0;
 char **rexec_argv;
 
