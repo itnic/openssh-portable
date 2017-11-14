@@ -2,9 +2,6 @@
 #include <VersionHelpers.h>
 
 #define PATH_MAX MAX_PATH
-#define SSH_ASYNC_STDIN "SSH_ASYNC_STDIN"
-#define SSH_ASYNC_STDOUT "SSH_ASYNC_STDOUT"
-#define SSH_ASYNC_STDERR "SSH_ASYNC_STDERR"
 
 #define GOTO_CLEANUP_IF(_cond_,_err_) do {  \
     if ((_cond_)) {                         \
