@@ -86,14 +86,15 @@ struct inh_fd_state {
 static char*
 fd_encode_state(int in, int out, int err)
 {
-	char *buf;
+	char *buf, *ret;
 	int i, num_inherited = 0;
 	struct std_fd_state *std_fd_state;
 	struct inh_fd_state *inh_fd_state, *c;
+	DWORD len_req;
 
 	/* find count of handles to be inherited */
-	for (i = 0; i < MAX_FDS; i++) {
-		if (FD_ISSET(i, &(fd_table.occupied)))
+	for (i = 3; i < MAX_FDS; i++) {
+		if (FD_ISSET(i, &(fd_table.occupied)) && !(fd_table.w32_ios[i]->fd_flags & FD_CLOEXEC))
 			if (i != in && i != out && i != err)
 				num_inherited++;
 	}
@@ -107,8 +108,8 @@ fd_encode_state(int in, int out, int err)
 	std_fd_state->err_type = fd_table.w32_ios[err]->type;
 
 	c = (struct inh_fd_state*)(buf + 8);
-	for (i = 0; i < MAX_FDS; i++) {
-		if (FD_ISSET(i, &(fd_table.occupied)))
+	for (i = 3; i < MAX_FDS; i++) {
+		if (FD_ISSET(i, &(fd_table.occupied)) && !(fd_table.w32_ios[i]->fd_flags & FD_CLOEXEC))
 			if (i != in && i != out && i != err) {
 				c->handle = fd_table.w32_ios[i]->handle;
 				c->index = i;
@@ -117,11 +118,15 @@ fd_encode_state(int in, int out, int err)
 			}				
 	}
 
-	return NULL;
+	CryptBinaryToStringA(buf, 8 * (1 + num_inherited), CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, NULL, &len_req);
+	ret = malloc(len_req);
+	CryptBinaryToStringA(buf, 8 * (1 + num_inherited), CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, ret, &len_req);
+
+	return ret;
 }
 
 static void
-fd_decode_state()
+fd_decode_state(char* buf)
 {
 
 }
@@ -1062,7 +1067,7 @@ spawn_child(char* cmd, char** argv, int in, int out, int err, unsigned long flag
 	si.dwFlags = STARTF_USESTDHANDLES;
 
 	/* send fd info */
-
+	char *fd_info = fd_encode_state(in, out, err);
 
 	debug3("spawning %ls", cmdline_utf16);
 	if (fd_table.w32_ios[in]->type != NONSOCK_SYNC_FD)
