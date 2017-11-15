@@ -60,9 +60,6 @@ struct w32fd_table {
 /* mapping table*/
 static struct w32fd_table fd_table;
 
-/* static table entries representing std in, out and error*/
-static struct w32_io w32_io_stdin, w32_io_stdout, w32_io_stderr;
-
 /* main thread handle*/
 HANDLE main_thread;
 
@@ -89,7 +86,7 @@ static char*
 fd_encode_state(int in, int out, int err)
 {
 	char *buf, *encoded;
-	int i, num_inherited = 0;
+	int i, num_inherited = 0, to_add;
 	struct std_fd_state *std_fd_state;
 	struct inh_fd_state *inh_fd_state, *c;
 	DWORD len_req;
@@ -116,14 +113,15 @@ fd_encode_state(int in, int out, int err)
 
 	i = STDERR_FILENO;
 	c = (struct inh_fd_state*)(buf + 8);
-	while (++i < MAX_FDS && num_inherited) {
+	to_add = num_inherited
+		;	while (++i < MAX_FDS && to_add) {
 		if (FD_ISSET(i, &(fd_table.occupied)) && !(fd_table.w32_ios[i]->fd_flags & FD_CLOEXEC))
 			if (i != in && i != out && i != err) {
 				c->handle = (int)(intptr_t)fd_table.w32_ios[i]->handle;
 				c->index = i;
 				c->type = fd_table.w32_ios[i]->type;
 				c++;
-				num_inherited--;
+				to_add--;
 			}				
 	}
 
@@ -169,7 +167,7 @@ fd_decode_state(char* enc_buf)
 		ZeroMemory(pio, sizeof(struct w32_io));
 		pio->handle = (void*)(INT_PTR)c->handle;
 		pio->type = c->type;
-		if (pio->type = SOCK_FD)
+		if (pio->type == SOCK_FD)
 			pio->internal.state = SOCK_READY;
 		fd_table_set(pio, c->index);
 		c++;
@@ -184,23 +182,33 @@ static int
 fd_table_initialize()
 {
 	char *posix_state;
+	/* table entries representing std in, out and error*/
+	struct w32_io *w32_io_stdin, *w32_io_stdout, *w32_io_stderr;
+
+	w32_io_stdin = malloc(sizeof(struct w32_io));
+	w32_io_stdout = malloc(sizeof(struct w32_io));
+	w32_io_stderr = malloc(sizeof(struct w32_io));
+	if (!w32_io_stdin || !w32_io_stdout || !w32_io_stderr) {
+		errno = ENOMEM;
+		return -1;
+	}
 
 	memset(&fd_table, 0, sizeof(fd_table));
 
-	memset(&w32_io_stdin, 0, sizeof(w32_io_stdin));
-	w32_io_stdin.std_handle = STD_INPUT_HANDLE;
-	w32_io_stdin.type = NONSOCK_SYNC_FD;
-	fd_table_set(&w32_io_stdin, STDIN_FILENO);
+	memset(w32_io_stdin, 0, sizeof(struct w32_io));
+	w32_io_stdin->std_handle = STD_INPUT_HANDLE;
+	w32_io_stdin->type = NONSOCK_SYNC_FD;
+	fd_table_set(w32_io_stdin, STDIN_FILENO);
 
-	memset(&w32_io_stdout, 0, sizeof(w32_io_stdout));
-	w32_io_stdout.std_handle = STD_OUTPUT_HANDLE;
-	w32_io_stdout.type = NONSOCK_SYNC_FD;
-	fd_table_set(&w32_io_stdout, STDOUT_FILENO);
+	memset(w32_io_stdout, 0, sizeof(struct w32_io));
+	w32_io_stdout->std_handle = STD_OUTPUT_HANDLE;
+	w32_io_stdout->type = NONSOCK_SYNC_FD;
+	fd_table_set(w32_io_stdout, STDOUT_FILENO);
 
-	memset(&w32_io_stderr, 0, sizeof(w32_io_stderr));
-	w32_io_stderr.std_handle = STD_ERROR_HANDLE;
-	w32_io_stderr.type = NONSOCK_SYNC_FD;
-	fd_table_set(&w32_io_stderr, STDERR_FILENO);
+	memset(w32_io_stderr, 0, sizeof(struct w32_io));
+	w32_io_stderr->std_handle = STD_ERROR_HANDLE;
+	w32_io_stderr->type = NONSOCK_SYNC_FD;
+	fd_table_set(w32_io_stderr, STDERR_FILENO);
 
 	_dupenv_s(&posix_state, NULL, POSIX_STATE_ENV);
 	if (NULL != posix_state) {
@@ -461,9 +469,34 @@ w32_shutdown(int fd, int how)
 int
 w32_socketpair(int domain, int type, int protocol, int sv[2])
 {
-	errno = ENOTSUP;
-	debug3("socketpair - ERROR not supported");
-	return -1;
+	int p0, p1;
+	struct w32_io* pio[2];
+
+	errno = 0;
+	p0 = fd_table_get_min_index();
+	if (p0 == -1)
+		return -1;
+
+	/*temporarily set occupied bit*/
+	FD_SET(p0, &fd_table.occupied);
+	p1 = fd_table_get_min_index();
+	FD_CLR(p0, &fd_table.occupied);
+	if (p1 == -1)
+		return -1;
+
+	if (-1 == fileio_pipe(pio, 1))
+		return -1;
+
+	pio[0]->type = NONSOCK_FD;
+	pio[1]->type = NONSOCK_FD;
+	fd_table_set(pio[0], p0);
+	fd_table_set(pio[1], p1);
+	sv[0] = p0;
+	sv[1] = p1;
+	debug4("socketpair - r-h:%d,io:%p,fd:%d  w-h:%d,io:%p,fd:%d",
+		pio[0]->handle, pio[0], p0, pio[1]->handle, pio[1], p1);
+
+	return 0;
 }
 
 
@@ -485,7 +518,7 @@ w32_pipe(int *pfds)
 	if (write_index == -1)
 		return -1;
 
-	if (-1 == fileio_pipe(pio))
+	if (-1 == fileio_pipe(pio, 0))
 		return -1;
 
 	pio[0]->type = NONSOCK_FD;
@@ -936,10 +969,36 @@ w32_dup(int oldfd)
 int
 w32_dup2(int oldfd, int newfd)
 {
+	struct w32_io* pio;
 	CHECK_FD(oldfd);
-	errno = EOPNOTSUPP;
-	debug3("dup2 - ERROR: not implemented yet");
-	return -1;
+
+	if (newfd > STDERR_FILENO && fd_table.w32_ios[newfd])
+		w32_close(newfd);
+
+	pio = malloc(sizeof(struct w32_io));
+	ZeroMemory(pio, sizeof(struct w32_io));
+	pio->type = fd_table.w32_ios[oldfd]->type;
+
+	if (pio->type == SOCK_FD) {
+		SOCKET dup_sock;
+		SOCKET sock = WINHANDLE(pio);
+		WSAPROTOCOL_INFOW info;
+		WSADuplicateSocketW(sock, GetCurrentProcessId(), &info);
+		dup_sock = WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &info, 0, 0);
+		pio->sock = dup_sock;
+		pio->internal.state = SOCK_READY;
+	} else {
+		HANDLE dup_handle;
+		if (!DuplicateHandle(GetCurrentProcess(), WINHANDLE(pio), GetCurrentProcess(), &dup_handle, 0, TRUE, DUPLICATE_SAME_ACCESS)) {
+			errno = EOTHER;
+			debug3("dup - ERROR: DuplicatedHandle() :%d", GetLastError());
+			return -1;
+		}
+		pio->handle = dup_handle;
+	}
+
+	fd_table_set(pio, newfd);
+	return 0;
 }
 
 HANDLE

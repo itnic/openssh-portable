@@ -1124,12 +1124,25 @@ server_listen(void)
 		fatal("Cannot bind any address.");
 }
 
+static int fork() { return 1; }
+
 static int
 process_connection(int *sock_in, int* sock_out, int *newsock, int *config_s, int *startup_p)
 {
 	int pid;
 	u_char rnd[256];
 	
+
+	close(startup_p[1]);
+	spawn_child("sshd.exe", rexec_argv+1, *newsock, *newsock, STDERR_FILENO, CREATE_NEW_PROCESS_GROUP);
+	if (rexec_flag) {
+		send_rexec_state(config_s[0], &cfg);
+		close(config_s[0]);
+		close(config_s[1]);
+	}
+	close(*newsock);
+	return 1;
+
 	if (debug_flag) {
 		/*
 		* In debugging mode.  Close the listening
@@ -1604,8 +1617,8 @@ main(int ac, char **av)
 	}
 	if (rexeced_flag || inetd_flag)
 		rexec_flag = 0;
-	if (!test_flag && (rexec_flag && (av[0] == NULL || *av[0] != '/')))
-		fatal("sshd re-exec requires execution with an absolute path");
+//	if (!test_flag && (rexec_flag && (av[0] == NULL || *av[0] != '/')))
+//		fatal("sshd re-exec requires execution with an absolute path");
 	if (rexeced_flag)
 		closefrom(REEXEC_MIN_FREE_FD);
 	else

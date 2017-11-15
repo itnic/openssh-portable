@@ -56,7 +56,6 @@ wmain(int argc, wchar_t **wargv) {
 	if (getenv("TERM") == NULL)
 		_putenv("TERM=xterm-256color");
 
-	Sleep(10 * 1000);
 	w32posix_initialize();
 	
 	r = main(argc, argv);

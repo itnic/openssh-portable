@@ -155,7 +155,7 @@ int socketio_close(struct w32_io* pio);
 BOOL fileio_is_io_available(struct w32_io* pio, BOOL rd);
 void fileio_on_select(struct w32_io* pio, BOOL rd);
 int fileio_close(struct w32_io* pio);
-int fileio_pipe(struct w32_io* pio[2]);
+int fileio_pipe(struct w32_io* pio[2], int);
 struct w32_io* fileio_afunix_socket();
 int fileio_connect(struct w32_io*, char*);
 struct w32_io* fileio_open(const char *pathname, int flags, mode_t mode);
