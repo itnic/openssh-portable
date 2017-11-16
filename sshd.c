@@ -122,12 +122,6 @@
 #include "version.h"
 #include "ssherr.h"
 
-/* Re-exec fds */
-#define REEXEC_DEVCRYPTO_RESERVED_FD	(STDERR_FILENO + 1)
-#define REEXEC_STARTUP_PIPE_FD		(STDERR_FILENO + 2)
-#define REEXEC_CONFIG_PASS_FD		(STDERR_FILENO + 3)
-#define REEXEC_MIN_FREE_FD		(STDERR_FILENO + 4)
-
 extern char *__progname;
 
 /* Server configuration options. */
@@ -1022,11 +1016,9 @@ server_accept_inetd(int *sock_in, int *sock_out)
 
 	startup_pipe = -1;
 	if (rexeced_flag) {
-		close(REEXEC_CONFIG_PASS_FD);
-		*sock_in = *sock_out = dup(STDIN_FILENO);
+		*sock_in = *sock_out = dup(STDOUT_FILENO);
 		if (!debug_flag) {
-			startup_pipe = dup(REEXEC_STARTUP_PIPE_FD);
-			close(REEXEC_STARTUP_PIPE_FD);
+			startup_pipe = dup(STDIN_FILENO);
 		}
 	} else {
 		*sock_in = dup(STDIN_FILENO);
@@ -1127,143 +1119,141 @@ server_listen(void)
 static int fork() { return 1; }
 
 static int
-process_connection(int *sock_in, int* sock_out, int *newsock, int *config_s, int *startup_p)
+process_connection(int *sock_in, int* sock_out, int *newsock, int *startup_p)
 {
 	int pid;
 	u_char rnd[256];
 	
-
-	close(startup_p[1]);
-	spawn_child("sshd.exe", rexec_argv+1, *newsock, *newsock, STDERR_FILENO, CREATE_NEW_PROCESS_GROUP);
+	fcntl(startup_p[0], F_SETFD, FD_CLOEXEC);
+	spawn_child("sshd.exe", rexec_argv+1, startup_p[1], *newsock, STDERR_FILENO, CREATE_NEW_PROCESS_GROUP);
 	if (rexec_flag) {
-		send_rexec_state(config_s[0], &cfg);
-		close(config_s[0]);
-		close(config_s[1]);
+		send_rexec_state(startup_p[0], &cfg);
 	}
+	close(startup_p[1]);
 	close(*newsock);
 	return 1;
 
-	if (debug_flag) {
-		/*
-		* In debugging mode.  Close the listening
-		* socket, and start processing the
-		* connection without forking.
-		*/
-		debug("Server will not fork when running in debugging mode.");
-		close_listen_socks();
-		*sock_in = *newsock;
-		*sock_out = *newsock;
-		close(startup_p[0]);
-		close(startup_p[1]);
-		startup_pipe = -1;
-		if (rexec_flag) {
-			send_rexec_state(config_s[0],
-				&cfg);
-			close(config_s[0]);
-		}
-	}
-	else {
-		/*
-		* Normal production daemon.  Fork, and have
-		* the child process the connection. The
-		* parent continues listening.
-		*/
-		platform_pre_fork();
-		
-		if ((pid = fork()) == 0) {
-			/*
-			* Child.  Close the listening and
-			* max_startup sockets.  Start using
-			* the accepted socket. Reinitialize
-			* logging (since our pid has changed).
-			* We break out of the loop to handle
-			* the connection.
-			*/
-			platform_post_fork_child();
-			startup_pipe = startup_p[1];
-			close_startup_pipes();
-			close_listen_socks();
-			*sock_in = *newsock;
-			*sock_out = *newsock;
-			log_init(__progname,
-				options.log_level,
-				options.log_facility,
-				log_stderr);
-			if (rexec_flag)
-				close(config_s[0]);
+//	if (debug_flag) {
+//		/*
+//		* In debugging mode.  Close the listening
+//		* socket, and start processing the
+//		* connection without forking.
+//		*/
+//		debug("Server will not fork when running in debugging mode.");
+//		close_listen_socks();
+//		*sock_in = *newsock;
+//		*sock_out = *newsock;
+//		close(startup_p[0]);
+//		close(startup_p[1]);
+//		startup_pipe = -1;
+//		if (rexec_flag) {
+//			send_rexec_state(config_s[0],
+//				&cfg);
+//			close(config_s[0]);
+//		}
+//	}
+//	else {
+//		/*
+//		* Normal production daemon.  Fork, and have
+//		* the child process the connection. The
+//		* parent continues listening.
+//		*/
+//		platform_pre_fork();
+//		
+//		if ((pid = fork()) == 0) {
+//			/*
+//			* Child.  Close the listening and
+//			* max_startup sockets.  Start using
+//			* the accepted socket. Reinitialize
+//			* logging (since our pid has changed).
+//			* We break out of the loop to handle
+//			* the connection.
+//			*/
+//			platform_post_fork_child();
+//			startup_pipe = startup_p[1];
+//			close_startup_pipes();
+//			close_listen_socks();
+//			*sock_in = *newsock;
+//			*sock_out = *newsock;
+//			log_init(__progname,
+//				options.log_level,
+//				options.log_facility,
+//				log_stderr);
+//			if (rexec_flag)
+//				close(config_s[0]);
+//
+//		} else {
+//			/* Parent */
+//			platform_post_fork_parent(pid);
+//			if (pid < 0)
+//				error("fork: %.100s", strerror(errno));
+//			else
+//				debug("Forked child %ld.", (long)pid);
+//
+//			close(startup_p[1]);
+//
+//			if (rexec_flag) {
+//				send_rexec_state(config_s[0], &cfg);
+//				close(config_s[0]);
+//				close(config_s[1]);
+//			}
+//			close(*newsock);
+//
+//			/*
+//			* Ensure that our random state differs
+//			* from that of the child
+//			*/
+//			arc4random_stir();
+//			arc4random_buf(rnd, sizeof(rnd));
+//#ifdef WITH_OPENSSL
+//			RAND_seed(rnd, sizeof(rnd));
+//			if ((RAND_bytes((u_char *)rnd, 1)) != 1)
+//				fatal("%s: RAND_bytes failed", __func__);
+//#endif
+//			explicit_bzero(rnd, sizeof(rnd));
+//			return 1;
+//		}
+//	}
 
-		} else {
-			/* Parent */
-			platform_post_fork_parent(pid);
-			if (pid < 0)
-				error("fork: %.100s", strerror(errno));
-			else
-				debug("Forked child %ld.", (long)pid);
+	//if (rexec_flag) {
+	//	int fd;
 
-			close(startup_p[1]);
+	//	debug("rexec start in %d out %d newsock %d pipe %d sock %d",
+	//		*sock_in, *sock_out, *newsock, startup_pipe, config_s[0]);
+	//	dup2(*newsock, STDIN_FILENO);
+	//	dup2(STDIN_FILENO, STDOUT_FILENO);
+	//	if (startup_pipe == -1)
+	//		close(REEXEC_STARTUP_PIPE_FD);
+	//	else if (startup_pipe != REEXEC_STARTUP_PIPE_FD) {
+	//		dup2(startup_pipe, REEXEC_STARTUP_PIPE_FD);
+	//		close(startup_pipe);
+	//		startup_pipe = REEXEC_STARTUP_PIPE_FD;
+	//	}
 
-			if (rexec_flag) {
-				send_rexec_state(config_s[0], &cfg);
-				close(config_s[0]);
-				close(config_s[1]);
-			}
-			close(*newsock);
+	//	dup2(config_s[1], REEXEC_CONFIG_PASS_FD);
+	//	close(config_s[1]);
 
-			/*
-			* Ensure that our random state differs
-			* from that of the child
-			*/
-			arc4random_stir();
-			arc4random_buf(rnd, sizeof(rnd));
-#ifdef WITH_OPENSSL
-			RAND_seed(rnd, sizeof(rnd));
-			if ((RAND_bytes((u_char *)rnd, 1)) != 1)
-				fatal("%s: RAND_bytes failed", __func__);
-#endif
-			explicit_bzero(rnd, sizeof(rnd));
-			return 1;
-		}
-	}
+	//	execv(rexec_argv[0], rexec_argv);
 
-	if (rexec_flag) {
-		int fd;
+	//	/* Reexec has failed, fall back and continue */
+	//	error("rexec of %s failed: %s", rexec_argv[0], strerror(errno));
+	//	recv_rexec_state(REEXEC_CONFIG_PASS_FD, NULL);
+	//	log_init(__progname, options.log_level,
+	//		options.log_facility, log_stderr);
 
-		debug("rexec start in %d out %d newsock %d pipe %d sock %d",
-			*sock_in, *sock_out, *newsock, startup_pipe, config_s[0]);
-		dup2(*newsock, STDIN_FILENO);
-		dup2(STDIN_FILENO, STDOUT_FILENO);
-		if (startup_pipe == -1)
-			close(REEXEC_STARTUP_PIPE_FD);
-		else if (startup_pipe != REEXEC_STARTUP_PIPE_FD) {
-			dup2(startup_pipe, REEXEC_STARTUP_PIPE_FD);
-			close(startup_pipe);
-			startup_pipe = REEXEC_STARTUP_PIPE_FD;
-		}
-
-		dup2(config_s[1], REEXEC_CONFIG_PASS_FD);
-		close(config_s[1]);
-
-		execv(rexec_argv[0], rexec_argv);
-
-		/* Reexec has failed, fall back and continue */
-		error("rexec of %s failed: %s", rexec_argv[0], strerror(errno));
-		recv_rexec_state(REEXEC_CONFIG_PASS_FD, NULL);
-		log_init(__progname, options.log_level,
-			options.log_facility, log_stderr);
-
-		/* Clean up fds */
-		close(REEXEC_CONFIG_PASS_FD);
-		*newsock = *sock_out = *sock_in = dup(STDIN_FILENO);
-		if ((fd = open(_PATH_DEVNULL, O_RDWR, 0)) != -1) {
-			dup2(fd, STDIN_FILENO);
-			dup2(fd, STDOUT_FILENO);
-			if (fd > STDERR_FILENO)
-				close(fd);
-		}
-		debug("rexec cleanup in %d out %d newsock %d pipe %d sock %d",
-			*sock_in, *sock_out, *newsock, startup_pipe, config_s[0]);
-	}
-	
+	//	/* Clean up fds */
+	//	close(REEXEC_CONFIG_PASS_FD);
+	//	*newsock = *sock_out = *sock_in = dup(STDIN_FILENO);
+	//	if ((fd = open(_PATH_DEVNULL, O_RDWR, 0)) != -1) {
+	//		dup2(fd, STDIN_FILENO);
+	//		dup2(fd, STDOUT_FILENO);
+	//		if (fd > STDERR_FILENO)
+	//			close(fd);
+	//	}
+	//	debug("rexec cleanup in %d out %d newsock %d pipe %d sock %d",
+	//		*sock_in, *sock_out, *newsock, startup_pipe, config_s[0]);
+	//}
+	//
 	return 0;
 }
 
@@ -1272,7 +1262,7 @@ process_connection(int *sock_in, int* sock_out, int *newsock, int *config_s, int
  * from this function are in a forked subprocess.
  */
 static void
-server_accept_loop(int *sock_in, int *sock_out, int *newsock, int *config_s)
+server_accept_loop(int *sock_in, int *sock_out, int *newsock)
 {
 	fd_set *fdset;
 	int i, j, ret, maxfd;
@@ -1369,18 +1359,9 @@ server_accept_loop(int *sock_in, int *sock_out, int *newsock, int *config_s)
 				close(*newsock);
 				continue;
 			}
-			if (pipe(startup_p) == -1) {
+			if (socketpair(AF_UNIX,
+				SOCK_STREAM, 0, startup_p) == -1) {
 				close(*newsock);
-				continue;
-			}
-
-			if (rexec_flag && socketpair(AF_UNIX,
-			    SOCK_STREAM, 0, config_s) == -1) {
-				error("reexec socketpair: %s",
-				    strerror(errno));
-				close(*newsock);
-				close(startup_p[0]);
-				close(startup_p[1]);
 				continue;
 			}
 
@@ -1393,7 +1374,7 @@ server_accept_loop(int *sock_in, int *sock_out, int *newsock, int *config_s)
 					break;
 				}
 
-			if (process_connection(sock_in, sock_out, newsock, config_s, startup_p) == 0)
+			if (process_connection(sock_in, sock_out, newsock, startup_p) == 0)
 				break;
 		}
 
@@ -1459,7 +1440,6 @@ main(int ac, char **av)
 	const char *remote_ip;
 	int remote_port;
 	char *fp, *line, *laddr, *logfile = NULL;
-	int config_s[2] = { -1 , -1 };
 	u_int n;
 	u_int64_t ibytes, obytes;
 	mode_t new_umask;
@@ -1619,10 +1599,7 @@ main(int ac, char **av)
 		rexec_flag = 0;
 //	if (!test_flag && (rexec_flag && (av[0] == NULL || *av[0] != '/')))
 //		fatal("sshd re-exec requires execution with an absolute path");
-	if (rexeced_flag)
-		closefrom(REEXEC_MIN_FREE_FD);
-	else
-		closefrom(REEXEC_DEVCRYPTO_RESERVED_FD);
+	closefrom(STDERR_FILENO + 1);
 
 #ifdef WITH_OPENSSL
 	OpenSSL_add_all_algorithms();
@@ -1673,7 +1650,7 @@ main(int ac, char **av)
 	/* Fetch our configuration */
 	buffer_init(&cfg);
 	if (rexeced_flag)
-		recv_rexec_state(REEXEC_CONFIG_PASS_FD, &cfg);
+		recv_rexec_state(STDIN_FILENO, &cfg);
 	else if (strcasecmp(config_file_name, "none") != 0)
 		load_server_config(config_file_name, &cfg);
 
@@ -1980,7 +1957,7 @@ main(int ac, char **av)
 
 		/* Accept a connection and return in a forked child */
 		server_accept_loop(&sock_in, &sock_out,
-		    &newsock, config_s);
+		    &newsock);
 	}
 
 	/* This is the child processing a new connection. */

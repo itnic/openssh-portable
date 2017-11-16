@@ -196,17 +196,17 @@ fd_table_initialize()
 	memset(&fd_table, 0, sizeof(fd_table));
 
 	memset(w32_io_stdin, 0, sizeof(struct w32_io));
-	w32_io_stdin->std_handle = STD_INPUT_HANDLE;
+	w32_io_stdin->handle = GetStdHandle(STD_INPUT_HANDLE);
 	w32_io_stdin->type = NONSOCK_SYNC_FD;
 	fd_table_set(w32_io_stdin, STDIN_FILENO);
 
 	memset(w32_io_stdout, 0, sizeof(struct w32_io));
-	w32_io_stdout->std_handle = STD_OUTPUT_HANDLE;
+	w32_io_stdout->handle = GetStdHandle(STD_OUTPUT_HANDLE);
 	w32_io_stdout->type = NONSOCK_SYNC_FD;
 	fd_table_set(w32_io_stdout, STDOUT_FILENO);
 
 	memset(w32_io_stderr, 0, sizeof(struct w32_io));
-	w32_io_stderr->std_handle = STD_ERROR_HANDLE;
+	w32_io_stderr->handle = GetStdHandle(STD_ERROR_HANDLE);
 	w32_io_stderr->type = NONSOCK_SYNC_FD;
 	fd_table_set(w32_io_stderr, STDERR_FILENO);
 
@@ -922,46 +922,51 @@ w32_select(int fds, w32_fd_set* readfds, w32_fd_set* writefds, w32_fd_set* excep
 	return out_ready_fds;
 }
 
+static HANDLE
+dup_handle(HANDLE h, int is_sock) 
+{
+	HANDLE ret = 0;
+	if (is_sock) {
+		SOCKET dup_sock;
+		SOCKET sock = (SOCKET)h;
+		WSAPROTOCOL_INFOW info;
+		WSADuplicateSocketW(sock, GetCurrentProcessId(), &info);
+		dup_sock = WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &info, 0, 0);
+		ret = (HANDLE)dup_sock;
+	}
+	else {
+		HANDLE dup_handle;
+		if (!DuplicateHandle(GetCurrentProcess(), h, GetCurrentProcess(), &dup_handle, 0, TRUE, DUPLICATE_SAME_ACCESS)) {
+			errno = EOTHER;
+			debug3("dup - ERROR: DuplicatedHandle() :%d", GetLastError());
+		}
+		ret = dup_handle;
+	}
+	return ret;
+}
+
 int
 w32_dup(int oldfd)
 {
 	int min_index;
 	struct w32_io* pio;
-	HANDLE src, target;
 	CHECK_FD(oldfd);
-	if (oldfd > STDERR_FILENO) {
-		errno = EOPNOTSUPP;
-		debug3("dup - ERROR: supports only std io, fd:%d", oldfd);
-		return -1;
-	}
 
 	if ((min_index = fd_table_get_min_index()) == -1)
 		return -1;
 
-	src = GetStdHandle(fd_table.w32_ios[oldfd]->std_handle);
-	if (src == INVALID_HANDLE_VALUE) {
-		errno = EINVAL;
-		debug3("dup - ERROR: unable to get underlying handle for std fd:%d", oldfd);
-		return -1;
-	}
-
-	if (!DuplicateHandle(GetCurrentProcess(), src, GetCurrentProcess(), &target, 0, TRUE, DUPLICATE_SAME_ACCESS)) {
-		errno = EOTHER;
-		debug3("dup - ERROR: DuplicatedHandle() :%d", GetLastError());
-		return -1;
-	}
-
 	pio = (struct w32_io*) malloc(sizeof(struct w32_io));
 	if (pio == NULL) {
-		CloseHandle(target);
 		errno = ENOMEM;
-		debug3("dup - ERROR: %d", errno);
 		return -1;
 	}
 
 	memset(pio, 0, sizeof(struct w32_io));
-	pio->handle = target;
+	if ((pio->handle = dup_handle(fd_table.w32_ios[oldfd]->handle, fd_table.w32_ios[oldfd]->type == SOCK_FD)) == 0)
+		return -1;
 	pio->type = fd_table.w32_ios[oldfd]->type;
+	if (pio->type == SOCK_FD)
+		pio->internal.state = SOCK_READY;
 	fd_table_set(pio, min_index);
 	return min_index;
 }
@@ -972,31 +977,18 @@ w32_dup2(int oldfd, int newfd)
 	struct w32_io* pio;
 	CHECK_FD(oldfd);
 
-	if (newfd > STDERR_FILENO && fd_table.w32_ios[newfd])
+	if (fd_table.w32_ios[newfd])
 		w32_close(newfd);
 
 	pio = malloc(sizeof(struct w32_io));
 	ZeroMemory(pio, sizeof(struct w32_io));
 	pio->type = fd_table.w32_ios[oldfd]->type;
 
-	if (pio->type == SOCK_FD) {
-		SOCKET dup_sock;
-		SOCKET sock = WINHANDLE(pio);
-		WSAPROTOCOL_INFOW info;
-		WSADuplicateSocketW(sock, GetCurrentProcessId(), &info);
-		dup_sock = WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &info, 0, 0);
-		pio->sock = dup_sock;
+	if ((pio->handle = dup_handle(fd_table.w32_ios[oldfd]->handle, fd_table.w32_ios[oldfd]->type == SOCK_FD)) == 0)
+		return -1;
+	if (pio->type == SOCK_FD) 
 		pio->internal.state = SOCK_READY;
-	} else {
-		HANDLE dup_handle;
-		if (!DuplicateHandle(GetCurrentProcess(), WINHANDLE(pio), GetCurrentProcess(), &dup_handle, 0, TRUE, DUPLICATE_SAME_ACCESS)) {
-			errno = EOTHER;
-			debug3("dup - ERROR: DuplicatedHandle() :%d", GetLastError());
-			return -1;
-		}
-		pio->handle = dup_handle;
-	}
-
+	
 	fd_table_set(pio, newfd);
 	return 0;
 }
@@ -1004,10 +996,7 @@ w32_dup2(int oldfd, int newfd)
 HANDLE
 w32_fd_to_handle(int fd)
 {
-	HANDLE h = fd_table.w32_ios[fd]->handle;
-	if (fd <= STDERR_FILENO)
-		h = GetStdHandle(fd_table.w32_ios[fd]->std_handle);
-	return h;
+	return fd_table.w32_ios[fd]->handle;
 }
 
 int 

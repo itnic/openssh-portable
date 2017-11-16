@@ -99,7 +99,6 @@ struct w32_io {
 	union {
 		SOCKET sock;
 		HANDLE handle;
-		DWORD std_handle;  /* ex. STD_INPUT_HANDLE */
 	};
 
 	/*internal state used by synchronous io - terminal handles and external 
@@ -122,8 +121,7 @@ struct w32_io {
 	}internal;
 };
 
-#define IS_STDIO(pio) ((pio)->table_index <= 2)
-#define WINHANDLE(pio) (IS_STDIO(pio)? GetStdHandle((pio)->std_handle):(pio)->handle)
+#define WINHANDLE(pio) ((pio)->handle)
 #define FILETYPE(pio) (GetFileType(WINHANDLE(pio)))
 extern HANDLE main_thread;
 
