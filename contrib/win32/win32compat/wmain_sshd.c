@@ -39,7 +39,6 @@
 
 int main(int, char **);
 extern HANDLE main_thread;
-extern int is_child;
 
 int scm_start_service(DWORD, LPWSTR*);
 
@@ -110,8 +109,6 @@ int sshd_main(int argc, wchar_t **wargv) {
 	}
 
 	w32posix_initialize();
-	if (getenv("SSHD_REMSOC"))
-		is_child = 1;
 	
 	/* change current directory to sshd.exe root */
 	wchar_t* path_utf16 = utf8_to_utf16(w32_programdir());

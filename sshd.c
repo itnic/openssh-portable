@@ -246,9 +246,6 @@ Buffer loginmsg;
 /* Unprivileged user */
 struct passwd *privsep_pw = NULL;
 
-/* is child process - used by Windows implementation*/
-int is_child = 0;
-
 /* Prototypes for various functions defined later in this file. */
 void destroy_sensitive_data(void);
 void demote_sensitive_data(void);
@@ -1142,116 +1139,6 @@ server_listen(void)
 		fatal("Cannot bind any address.");
 }
 
-/* 
- * Called by server_accept_loop.
- * Processes an incoming connection
- * Return value
- * 0 - stop listening
- * 1 - continue listening
- */
-static int
-process_connection(int *sock_in, int* sock_out, int *newsock, int *startup_p)
-{
-	int pid;
-	u_char rnd[256];
-
-	fcntl(startup_p[0], F_SETFD, FD_CLOEXEC);
-
-	if (debug_flag) {
-		/*
-		* In debugging mode.  Close the listening
-		* socket, and start processing the
-		* connection without forking.
-		*/
-		debug("Server will not fork when running in debugging mode.");
-		close_listen_socks();
-		*sock_in = *newsock;
-		*sock_out = *newsock;
-		close(startup_p[0]);
-		close(startup_p[1]);
-		startup_pipe = -1;
-		return 0; /* stop listening */
-
-	} else if (rexec_flag) { /* re-spawn sshd */
-		posix_spawn_file_actions_t actions;
-		posix_spawnattr_t attributes;
-
-		fcntl(startup_p[0], F_SETFD, FD_CLOEXEC);
-
-		if (posix_spawn_file_actions_init(&actions) != 0 ||
-			posix_spawn_file_actions_adddup2(&actions, startup_p[1], STDIN_FILENO) != 0 ||
-			posix_spawn_file_actions_adddup2(&actions, *newsock, STDOUT_FILENO) != 0 ||
-			posix_spawnattr_init(&attributes) != 0 ||
-			posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP) != 0 ||
-			posix_spawnattr_setpgroup(&attributes, 0) != 0) {
-			error("posix_spawn initialization failed");
-		} else {
-			if (posix_spawn(&pid, rexec_argv[0], &actions, &attributes, rexec_argv, NULL) != 0)
-				error("posix_spawn failed");
-			posix_spawn_file_actions_destroy(&actions);
-			posix_spawnattr_destroy(&attributes);
-		}
-
-		close(startup_p[1]);
-		close(*newsock);
-
-		send_rexec_state(startup_p[0], &cfg);
-
-	} else { /* fork off parent */
-
-		platform_pre_fork();
-		
-		if ((pid = fork()) == 0) {
-			/*
-			* Child.  Close the listening and
-			* max_startup sockets.  Start using
-			* the accepted socket. Reinitialize
-			* logging (since our pid has changed).
-			* We break out of the loop to handle
-			* the connection.
-			*/
-			platform_post_fork_child();
-			startup_pipe = startup_p[1];
-			close_startup_pipes();
-			close_listen_socks();
-			*sock_in = *newsock;
-			*sock_out = *newsock;
-			log_init(__progname,
-				options.log_level,
-				options.log_facility,
-				log_stderr);
-		} else {
-			/* Parent */
-			platform_post_fork_parent(pid);
-			if (pid < 0)
-				error("fork: %.100s", strerror(errno));
-			else
-				debug("Forked child %ld.", (long)pid);
-		}
-	}
-
-	/* parent */
-	close(startup_p[1]);
-	close(*newsock);
-
-	if (rexec_flag)
-		send_rexec_state(startup_p[0], &cfg);
-
-	/*
-	* Ensure that our random state differs
-	* from that of the child
-	*/
-	arc4random_stir();
-	arc4random_buf(rnd, sizeof(rnd));
-#ifdef WITH_OPENSSL
-	RAND_seed(rnd, sizeof(rnd));
-	if ((RAND_bytes((u_char *)rnd, 1)) != 1)
-		fatal("%s: RAND_bytes failed", __func__);
-#endif
-	explicit_bzero(rnd, sizeof(rnd));
-	return 1; /* continue listening*/
-}
-
 /*
  * The main TCP accept loop. Note that, for the non-debug case, returns
  * from this function are in a forked subprocess.
@@ -1265,6 +1152,9 @@ server_accept_loop(int *sock_in, int *sock_out, int *newsock)
 	int startup_p[2] = { -1 , -1 };
 	struct sockaddr_storage from;
 	socklen_t fromlen;
+	pid_t pid;
+	u_char rnd[256];
+
 
 	/* setup fd set for accept */
 	fdset = NULL;
@@ -1360,6 +1250,8 @@ server_accept_loop(int *sock_in, int *sock_out, int *newsock)
 				continue;
 			}
 
+			fcntl(startup_p[0], F_SETFD, FD_CLOEXEC);
+
 			for (j = 0; j < options.max_startups; j++)
 				if (startup_pipes[j] == -1) {
 					startup_pipes[j] = startup_p[0];
@@ -1369,8 +1261,97 @@ server_accept_loop(int *sock_in, int *sock_out, int *newsock)
 					break;
 				}
 
-			if (process_connection(sock_in, sock_out, newsock, startup_p) == 0)
+			/* Process connection */
+			
+			if (debug_flag) {
+				/*
+				* In debugging mode.  Close the listening
+				* socket, and start processing the
+				* connection without forking.
+				*/
+				debug("Server will not fork when running in debugging mode.");
+				close_listen_socks();
+				*sock_in = *newsock;
+				*sock_out = *newsock;
+				close(startup_p[0]);
+				close(startup_p[1]);
+				startup_pipe = -1;
 				break;
+
+			}
+			else if (rexec_flag) { /* re-spawn sshd */
+				posix_spawn_file_actions_t actions;
+				posix_spawnattr_t attributes;
+
+				if (posix_spawn_file_actions_init(&actions) != 0 ||
+					posix_spawn_file_actions_adddup2(&actions, startup_p[1], STDIN_FILENO) != 0 ||
+					posix_spawn_file_actions_adddup2(&actions, *newsock, STDOUT_FILENO) != 0 ||
+					posix_spawnattr_init(&attributes) != 0 ||
+					posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP) != 0 ||
+					posix_spawnattr_setpgroup(&attributes, 0) != 0) {
+					error("posix_spawn initialization failed");
+				}
+				else {
+					if (posix_spawn(&pid, rexec_argv[0], &actions, &attributes, rexec_argv, NULL) != 0)
+						error("posix_spawn failed");
+					posix_spawn_file_actions_destroy(&actions);
+					posix_spawnattr_destroy(&attributes);
+				}
+			}
+			else { /* fork off parent */
+
+				platform_pre_fork();
+
+				if ((pid = fork()) == 0) {
+					/*
+					* Child.  Close the listening and
+					* max_startup sockets.  Start using
+					* the accepted socket. Reinitialize
+					* logging (since our pid has changed).
+					* We break out of the loop to handle
+					* the connection.
+					*/
+					platform_post_fork_child();
+					startup_pipe = startup_p[1];
+					close_startup_pipes();
+					close_listen_socks();
+					*sock_in = *newsock;
+					*sock_out = *newsock;
+					log_init(__progname,
+						options.log_level,
+						options.log_facility,
+						log_stderr);
+					break;
+				} else {
+					/* Parent */
+					platform_post_fork_parent(pid);
+					if (pid < 0)
+						error("fork: %.100s", strerror(errno));
+					else
+						debug("Forked child %ld.", (long)pid);
+				}
+			}
+
+			/* parent */
+			close(startup_p[1]);
+			close(*newsock);
+
+			if (rexec_flag)
+				send_rexec_state(startup_p[0], &cfg);
+
+			/*
+			* Ensure that our random state differs
+			* from that of the child
+			*/
+			arc4random_stir();
+			arc4random_buf(rnd, sizeof(rnd));
+#ifdef WITH_OPENSSL
+			RAND_seed(rnd, sizeof(rnd));
+			if ((RAND_bytes((u_char *)rnd, 1)) != 1)
+				fatal("%s: RAND_bytes failed", __func__);
+#endif
+			explicit_bzero(rnd, sizeof(rnd));
+
 		}
 
 		/* child process check (or debug mode) */
@@ -1963,10 +1944,6 @@ main(int ac, char **av)
 		server_accept_inetd(&sock_in, &sock_out);
 	} else {
 		platform_pre_listen();
-#ifdef WINDOWS
-		/* For Windows child sshd, skip listener */
-		if (is_child == 0)
-#endif /* WINDOWS */
 		server_listen();
 
 		signal(SIGHUP, sighup_handler);
