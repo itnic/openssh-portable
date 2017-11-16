@@ -109,7 +109,6 @@ int sshd_main(int argc, wchar_t **wargv) {
 			argv[i] = utf16_to_utf8(wargv[i]);
 	}
 
-	Sleep(10 * 1000);
 	w32posix_initialize();
 	if (getenv("SSHD_REMSOC"))
 		is_child = 1;

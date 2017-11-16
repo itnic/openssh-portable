@@ -1048,6 +1048,11 @@ w32_fsync(int fd)
 	return FlushFileBuffers(w32_fd_to_handle(fd));
 }
 
+int fork() 
+{ 
+	error("fork is not supported"); 
+	return -1;
+}
 
 /*
 * spawn a child process

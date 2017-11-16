@@ -72,6 +72,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <limits.h>
+#include <spawn.h>
 
 #ifdef WITH_OPENSSL
 #include <openssl/dh.h>
@@ -1116,145 +1117,114 @@ server_listen(void)
 		fatal("Cannot bind any address.");
 }
 
-static int fork() { return 1; }
-
+/* 
+ * Called by server_accept_loop.
+ * Processes an incoming connection
+ * Return value
+ * 0 - stop listening
+ * 1 - continue listening
+ */
 static int
 process_connection(int *sock_in, int* sock_out, int *newsock, int *startup_p)
 {
 	int pid;
 	u_char rnd[256];
-	
+
 	fcntl(startup_p[0], F_SETFD, FD_CLOEXEC);
-	spawn_child("sshd.exe", rexec_argv+1, startup_p[1], *newsock, STDERR_FILENO, CREATE_NEW_PROCESS_GROUP);
-	if (rexec_flag) {
+
+	if (debug_flag) {
+		/*
+		* In debugging mode.  Close the listening
+		* socket, and start processing the
+		* connection without forking.
+		*/
+		debug("Server will not fork when running in debugging mode.");
+		close_listen_socks();
+		*sock_in = *newsock;
+		*sock_out = *newsock;
+		close(startup_p[0]);
+		close(startup_p[1]);
+		startup_pipe = -1;
+		return 0; /* stop listening */
+
+	} else if (rexec_flag) { /* re-spawn sshd */
+		posix_spawn_file_actions_t actions;
+		posix_spawnattr_t attributes;
+
+		fcntl(startup_p[0], F_SETFD, FD_CLOEXEC);
+
+		if (posix_spawn_file_actions_init(&actions) != 0 ||
+			posix_spawn_file_actions_adddup2(&actions, startup_p[1], STDIN_FILENO) != 0 ||
+			posix_spawn_file_actions_adddup2(&actions, *newsock, STDOUT_FILENO) != 0 ||
+			posix_spawnattr_init(&attributes) != 0 ||
+			posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP) != 0 ||
+			posix_spawnattr_setpgroup(&attributes, 0) != 0) {
+			error("posix_spawn initialization failed");
+		} else {
+			if (posix_spawn(&pid, rexec_argv[0], &actions, &attributes, rexec_argv, NULL) != 0)
+				error("posix_spawn failed");
+			posix_spawn_file_actions_destroy(&actions);
+			posix_spawnattr_destroy(&attributes);
+		}
+
+		close(startup_p[1]);
+		close(*newsock);
+
 		send_rexec_state(startup_p[0], &cfg);
+
+	} else { /* fork off parent */
+
+		platform_pre_fork();
+		
+		if ((pid = fork()) == 0) {
+			/*
+			* Child.  Close the listening and
+			* max_startup sockets.  Start using
+			* the accepted socket. Reinitialize
+			* logging (since our pid has changed).
+			* We break out of the loop to handle
+			* the connection.
+			*/
+			platform_post_fork_child();
+			startup_pipe = startup_p[1];
+			close_startup_pipes();
+			close_listen_socks();
+			*sock_in = *newsock;
+			*sock_out = *newsock;
+			log_init(__progname,
+				options.log_level,
+				options.log_facility,
+				log_stderr);
+		} else {
+			/* Parent */
+			platform_post_fork_parent(pid);
+			if (pid < 0)
+				error("fork: %.100s", strerror(errno));
+			else
+				debug("Forked child %ld.", (long)pid);
+		}
 	}
+
+	/* parent */
 	close(startup_p[1]);
 	close(*newsock);
-	return 1;
 
-//	if (debug_flag) {
-//		/*
-//		* In debugging mode.  Close the listening
-//		* socket, and start processing the
-//		* connection without forking.
-//		*/
-//		debug("Server will not fork when running in debugging mode.");
-//		close_listen_socks();
-//		*sock_in = *newsock;
-//		*sock_out = *newsock;
-//		close(startup_p[0]);
-//		close(startup_p[1]);
-//		startup_pipe = -1;
-//		if (rexec_flag) {
-//			send_rexec_state(config_s[0],
-//				&cfg);
-//			close(config_s[0]);
-//		}
-//	}
-//	else {
-//		/*
-//		* Normal production daemon.  Fork, and have
-//		* the child process the connection. The
-//		* parent continues listening.
-//		*/
-//		platform_pre_fork();
-//		
-//		if ((pid = fork()) == 0) {
-//			/*
-//			* Child.  Close the listening and
-//			* max_startup sockets.  Start using
-//			* the accepted socket. Reinitialize
-//			* logging (since our pid has changed).
-//			* We break out of the loop to handle
-//			* the connection.
-//			*/
-//			platform_post_fork_child();
-//			startup_pipe = startup_p[1];
-//			close_startup_pipes();
-//			close_listen_socks();
-//			*sock_in = *newsock;
-//			*sock_out = *newsock;
-//			log_init(__progname,
-//				options.log_level,
-//				options.log_facility,
-//				log_stderr);
-//			if (rexec_flag)
-//				close(config_s[0]);
-//
-//		} else {
-//			/* Parent */
-//			platform_post_fork_parent(pid);
-//			if (pid < 0)
-//				error("fork: %.100s", strerror(errno));
-//			else
-//				debug("Forked child %ld.", (long)pid);
-//
-//			close(startup_p[1]);
-//
-//			if (rexec_flag) {
-//				send_rexec_state(config_s[0], &cfg);
-//				close(config_s[0]);
-//				close(config_s[1]);
-//			}
-//			close(*newsock);
-//
-//			/*
-//			* Ensure that our random state differs
-//			* from that of the child
-//			*/
-//			arc4random_stir();
-//			arc4random_buf(rnd, sizeof(rnd));
-//#ifdef WITH_OPENSSL
-//			RAND_seed(rnd, sizeof(rnd));
-//			if ((RAND_bytes((u_char *)rnd, 1)) != 1)
-//				fatal("%s: RAND_bytes failed", __func__);
-//#endif
-//			explicit_bzero(rnd, sizeof(rnd));
-//			return 1;
-//		}
-//	}
+	if (rexec_flag)
+		send_rexec_state(startup_p[0], &cfg);
 
-	//if (rexec_flag) {
-	//	int fd;
-
-	//	debug("rexec start in %d out %d newsock %d pipe %d sock %d",
-	//		*sock_in, *sock_out, *newsock, startup_pipe, config_s[0]);
-	//	dup2(*newsock, STDIN_FILENO);
-	//	dup2(STDIN_FILENO, STDOUT_FILENO);
-	//	if (startup_pipe == -1)
-	//		close(REEXEC_STARTUP_PIPE_FD);
-	//	else if (startup_pipe != REEXEC_STARTUP_PIPE_FD) {
-	//		dup2(startup_pipe, REEXEC_STARTUP_PIPE_FD);
-	//		close(startup_pipe);
-	//		startup_pipe = REEXEC_STARTUP_PIPE_FD;
-	//	}
-
-	//	dup2(config_s[1], REEXEC_CONFIG_PASS_FD);
-	//	close(config_s[1]);
-
-	//	execv(rexec_argv[0], rexec_argv);
-
-	//	/* Reexec has failed, fall back and continue */
-	//	error("rexec of %s failed: %s", rexec_argv[0], strerror(errno));
-	//	recv_rexec_state(REEXEC_CONFIG_PASS_FD, NULL);
-	//	log_init(__progname, options.log_level,
-	//		options.log_facility, log_stderr);
-
-	//	/* Clean up fds */
-	//	close(REEXEC_CONFIG_PASS_FD);
-	//	*newsock = *sock_out = *sock_in = dup(STDIN_FILENO);
-	//	if ((fd = open(_PATH_DEVNULL, O_RDWR, 0)) != -1) {
-	//		dup2(fd, STDIN_FILENO);
-	//		dup2(fd, STDOUT_FILENO);
-	//		if (fd > STDERR_FILENO)
-	//			close(fd);
-	//	}
-	//	debug("rexec cleanup in %d out %d newsock %d pipe %d sock %d",
-	//		*sock_in, *sock_out, *newsock, startup_pipe, config_s[0]);
-	//}
-	//
-	return 0;
+	/*
+	* Ensure that our random state differs
+	* from that of the child
+	*/
+	arc4random_stir();
+	arc4random_buf(rnd, sizeof(rnd));
+#ifdef WITH_OPENSSL
+	RAND_seed(rnd, sizeof(rnd));
+	if ((RAND_bytes((u_char *)rnd, 1)) != 1)
+		fatal("%s: RAND_bytes failed", __func__);
+#endif
+	explicit_bzero(rnd, sizeof(rnd));
+	return 1; /* continue listening*/
 }
 
 /*
@@ -1597,8 +1567,13 @@ main(int ac, char **av)
 	}
 	if (rexeced_flag || inetd_flag)
 		rexec_flag = 0;
-//	if (!test_flag && (rexec_flag && (av[0] == NULL || *av[0] != '/')))
-//		fatal("sshd re-exec requires execution with an absolute path");
+	if (!test_flag && !debug_flag && rexec_flag && 
+#ifdef WINDOWS
+	    (av[0] == NULL || *av[0] == '\0' || av[0][1] != ':'))
+#else
+	    (av[0] == NULL || *av[0] != '/'))
+#endif
+		fatal("sshd re-exec requires execution with an absolute path");
 	closefrom(STDERR_FILENO + 1);
 
 #ifdef WITH_OPENSSL
