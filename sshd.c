@@ -185,6 +185,10 @@ char *server_version_string = NULL;
 int auth_sock = -1;
 int have_agent = 0;
 
+int is_unprivchild = 0;
+int is_authchild = 0;
+int tmp_sock = 0;
+
 /*
  * Any really sensitive data in the application is contained in this
  * structure. The idea is that this structure could be locked into memory so
@@ -219,7 +223,7 @@ int *startup_pipes = NULL;
 int startup_pipe;		/* in child */
 
 /* variables used for privilege separation */
-#ifdef WINDOWS
+#ifdef WINDOWS_OLD
 /* Windows does not use Unix privilege separation model */
 int use_prevsep = 0;
 #else
@@ -529,7 +533,7 @@ reseed_prngs(void)
 	explicit_bzero(rnd, sizeof(rnd));
 }
 
-#ifdef WINDOWS
+#ifdef WINDOWS__
 /* 
  * No-OP defs for preauth routines for Windows 
  * these should go away once the privilege separation 
@@ -602,6 +606,58 @@ privsep_preauth(Authctxt *authctxt)
 	/* Store a pointer to the kex for later rekeying */
 	pmonitor->m_pkex = &active_state->kex;
 
+	if (is_authchild)
+		return 1;
+	else if (is_unprivchild) {
+		close(pmonitor->m_sendfd);
+		close(pmonitor->m_log_recvfd);
+		close(pmonitor->m_recvfd);
+		close(pmonitor->m_log_sendfd);
+
+		pmonitor->m_recvfd = dup(STDIN_FILENO);
+		pmonitor->m_log_sendfd = dup(STDERR_FILENO);
+
+		/* Arrange for logging to be sent to the monitor */
+		set_log_handler(mm_log_handler, pmonitor);
+
+		privsep_preauth_child();
+		setproctitle("%s", "[net]");
+		return 0;
+	}
+	else { /* parent */
+		posix_spawn_file_actions_t actions;
+		posix_spawnattr_t attributes;
+
+		if (posix_spawn_file_actions_init(&actions) != 0 ||
+			posix_spawn_file_actions_adddup2(&actions, pmonitor->m_recvfd, STDIN_FILENO) != 0 ||
+			posix_spawn_file_actions_adddup2(&actions, tmp_sock, STDOUT_FILENO) != 0 ||
+			posix_spawn_file_actions_adddup2(&actions, pmonitor->m_log_sendfd, STDERR_FILENO) != 0 ||
+			posix_spawnattr_init(&attributes) != 0 ||
+			posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP) != 0 ||
+			posix_spawnattr_setpgroup(&attributes, 0) != 0) {
+			error("posix_spawn initialization failed");
+		}
+		else {
+			char* arg[2];
+			arg[0] = "sshd.exe";
+			arg[1] = "-Y";
+			if (posix_spawn(&pid, "sshd -Y" , &actions, &attributes, arg, NULL) != 0)
+				error("posix_spawn failed");
+			posix_spawn_file_actions_destroy(&actions);
+		}
+		monitor_child_preauth(authctxt, pmonitor);
+		while (waitpid(pid, &status, 0) < 0) {
+			if (errno == EINTR)
+				continue;
+			pmonitor->m_pid = -1;
+			fatal("%s: waitpid: %s", __func__, strerror(errno));
+		}
+		privsep_is_preauth = 0;
+		pmonitor->m_pid = -1;
+		return 1;
+	}
+
+#if (0)
 	if (use_privsep == PRIVSEP_ON)
 		box = ssh_sandbox_init(pmonitor);
 	pid = fork();
@@ -657,11 +713,14 @@ privsep_preauth(Authctxt *authctxt)
 
 		return 0;
 	}
+#endif
 }
 
 static void
 privsep_postauth(Authctxt *authctxt)
 {
+	return;
+#if (0)
 #ifdef DISABLE_FD_PASSING
 	if (1) {
 #else
@@ -710,6 +769,7 @@ privsep_postauth(Authctxt *authctxt)
 	 * this information is not part of the key state.
 	 */
 	packet_set_authenticated();
+#endif
 }
 
 #endif  /* !WINDOWS */
@@ -1496,8 +1556,11 @@ main(int ac, char **av)
 
 	/* Parse command-line arguments. */
 	while ((opt = getopt(ac, av,
-	    "C:E:b:c:f:g:h:k:o:p:u:46DQRTdeiqrt")) != -1) {
+	    "C:E:b:c:f:g:h:k:o:p:u:46DQRTdeiqrtYZ")) != -1) {
 		switch (opt) {
+		case 'Y':
+			is_unprivchild = 1;
+			break;
 		case '4':
 			options.address_family = AF_INET;
 			break;
@@ -1940,7 +2003,10 @@ main(int ac, char **av)
 	signal(SIGPIPE, SIG_IGN);
 
 	/* Get a connection, either from inetd or a listening TCP socket */
-	if (inetd_flag) {
+	if (is_unprivchild || is_authchild) {
+		sock_in = sock_out = dup(STDOUT_FILENO);
+		close(STDOUT_FILENO);
+	} else if (inetd_flag) {
 		server_accept_inetd(&sock_in, &sock_out);
 	} else {
 		platform_pre_listen();
@@ -1991,8 +2057,8 @@ main(int ac, char **av)
 #endif
 
 	/* Executed child processes don't need these. */
-	fcntl(sock_out, F_SETFD, FD_CLOEXEC);
-	fcntl(sock_in, F_SETFD, FD_CLOEXEC);
+	//fcntl(sock_out, F_SETFD, FD_CLOEXEC);
+	//fcntl(sock_in, F_SETFD, FD_CLOEXEC);
 
 	/*
 	 * Disable the key regeneration alarm.  We will not regenerate the
@@ -2011,6 +2077,7 @@ main(int ac, char **av)
 	 * Register our connection.  This turns encryption off because we do
 	 * not have a key.
 	 */
+	tmp_sock = sock_in;
 	packet_set_connection(sock_in, sock_out);
 	packet_set_server();
 	ssh = active_state; /* XXX */
@@ -2057,6 +2124,7 @@ main(int ac, char **av)
 	    rdomain == NULL ? "" : "\"");
 	free(laddr);
 
+  if(!is_unprivchild && !is_authchild) {
 	/*
 	 * We don't want to listen forever unless the other side
 	 * successfully authenticates itself.  So we set up an alarm which is
@@ -2083,7 +2151,7 @@ main(int ac, char **av)
 	/* prepare buffer to collect messages to display to user after login */
 	buffer_init(&loginmsg);
 	auth_debug_reset();
-
+    }
 	if (use_privsep) {
 		if (privsep_preauth(authctxt) == 1)
 			goto authenticated;

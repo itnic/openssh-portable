@@ -93,11 +93,11 @@ fd_encode_state(int in, int out, int err)
 	BOOL b;
 
 	/* find count of handles to be inherited */
-	for (i = 3; i < MAX_FDS; i++) {
+	/*for (i = 3; i < MAX_FDS; i++) {
 		if (FD_ISSET(i, &(fd_table.occupied)) && !(fd_table.w32_ios[i]->fd_flags & FD_CLOEXEC))
 			if (i != in && i != out && i != err)
 				num_inherited++;
-	}
+	}*/
 
 	buf = malloc(8 * (1 + num_inherited));
 	if (!buf) {
@@ -113,8 +113,8 @@ fd_encode_state(int in, int out, int err)
 
 	i = STDERR_FILENO;
 	c = (struct inh_fd_state*)(buf + 8);
-	to_add = num_inherited
-		;	while (++i < MAX_FDS && to_add) {
+	to_add = num_inherited;
+	while (++i < MAX_FDS && to_add) {
 		if (FD_ISSET(i, &(fd_table.occupied)) && !(fd_table.w32_ios[i]->fd_flags & FD_CLOEXEC))
 			if (i != in && i != out && i != err) {
 				c->handle = (int)(intptr_t)fd_table.w32_ios[i]->handle;

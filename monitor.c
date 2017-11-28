@@ -1669,7 +1669,7 @@ monitor_openfds(struct monitor *mon, int do_logfds)
 	if (setsockopt(pair[1], SOL_SOCKET, SO_ZEROIZE, &on, sizeof(on)) < 0)
 		error("setsockopt SO_ZEROIZE(1): %.100s", strerror(errno));
 #endif
-	FD_CLOSEONEXEC(pair[0]);
+	//FD_CLOSEONEXEC(pair[0]);
 	FD_CLOSEONEXEC(pair[1]);
 	mon->m_recvfd = pair[0];
 	mon->m_sendfd = pair[1];
@@ -1678,7 +1678,7 @@ monitor_openfds(struct monitor *mon, int do_logfds)
 		if (pipe(pair) == -1)
 			fatal("%s: pipe: %s", __func__, strerror(errno));
 		FD_CLOSEONEXEC(pair[0]);
-		FD_CLOSEONEXEC(pair[1]);
+		//FD_CLOSEONEXEC(pair[1]);
 		mon->m_log_recvfd = pair[0];
 		mon->m_log_sendfd = pair[1];
 	} else
