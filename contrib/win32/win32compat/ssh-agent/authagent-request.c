@@ -40,9 +40,10 @@
 #include "key.h"
 #include "inc\utf.h"
 #include "..\priv-agent.h"
-#include <Ntsecapi.h>
 #include "logonuser.h"
+#include <Ntsecapi.h>
 #include <ntstatus.h>
+
 #pragma warning(push, 3)
 
 int pubkey_allowed(struct sshkey* pubkey, char*  user_utf8);
@@ -508,7 +509,7 @@ int process_privagent_request(struct sshbuf* request, struct sshbuf* response, s
 	else if (memcmp(opn, LOAD_USER_PROFILE_REQUEST, opn_len) == 0)
 		return process_loadprofile_request(request, response, con);
 	else if (memcmp(opn, CUSTOMPWDAUTH_REQUEST, opn_len) == 0)
-		return process_custompwdauth_request(request, response, con);
+		return process_custompwdauth_request(request, response, con); 
 	else {
 		debug("unknown auth request: %s", opn);
 		return -1;
