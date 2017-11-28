@@ -154,6 +154,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="$(OpenSSH-Src-Path)authconfig.c">
+          <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="$(OpenSSH-Src-Path)contrib\win32\win32compat\logonuser.c">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

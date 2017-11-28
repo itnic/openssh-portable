@@ -34,6 +34,7 @@
 
 #include <Windows.h>
 #include <stdio.h>
+#include "inc\sys\types.h"
 
 enum w32_io_type {
 	UNKNOWN_FD = 0,
@@ -101,6 +102,19 @@ struct w32_io {
 		DWORD std_handle;  /* ex. STD_INPUT_HANDLE */
 	};
 
+	/*internal state used by synchronous io - terminal handles and external 
+	  handles passed through std io*/
+	struct {
+		DWORD to_transfer;
+		DWORD transferred;
+		DWORD error;
+	}sync_read_status;
+	struct {
+		DWORD to_transfer;
+		DWORD transferred;
+		DWORD error;
+	}sync_write_status;
+
 	/*handle specific internal state context, used by sockets and pipes*/
 	struct {
 		enum w32_io_sock_state state;
@@ -144,10 +158,10 @@ int fileio_close(struct w32_io* pio);
 int fileio_pipe(struct w32_io* pio[2]);
 struct w32_io* fileio_afunix_socket();
 int fileio_connect(struct w32_io*, char*);
-struct w32_io* fileio_open(const char *pathname, int flags, u_short mode);
+struct w32_io* fileio_open(const char *pathname, int flags, mode_t mode);
 int fileio_read(struct w32_io* pio, void *dst, size_t max);
 int fileio_write(struct w32_io* pio, const void *buf, size_t max);
 int fileio_fstat(struct w32_io* pio, struct _stat64 *buf);
 int fileio_stat(const char *path, struct _stat64 *buf);
-long fileio_lseek(struct w32_io* pio, long offset, int origin);
+long fileio_lseek(struct w32_io* pio, unsigned __int64 offset, int origin);
 FILE* fileio_fdopen(struct w32_io* pio, const char *mode);

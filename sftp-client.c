@@ -1,4 +1,4 @@
-/* $OpenBSD: sftp-client.c,v 1.126 2017/01/03 05:46:51 djm Exp $ */
+/* $OpenBSD: sftp-client.c,v 1.127 2017/08/11 04:41:08 djm Exp $ */
 /*
  * Copyright (c) 2001-2004 Damien Miller <djm@openbsd.org>
  *
@@ -140,7 +140,7 @@ get_msg(struct sftp_conn *conn, struct sshbuf *m)
 		fatal("%s: buffer error: %s", __func__, ssh_err(r));
 	if (atomicio6(read, conn->fd_in, p, 4,
 	    conn->limit_kbps > 0 ? sftpio : NULL, &conn->bwlimit_in) != 4) {
-		if (errno == EPIPE)
+		if (errno == EPIPE || errno == ECONNRESET)
 			fatal("Connection closed");
 		else
 			fatal("Couldn't read packet: %s", strerror(errno));
@@ -1219,8 +1219,13 @@ do_download(struct sftp_conn *conn, const char *remote_path,
 		return(-1);
 	}
 
+#ifdef WINDOWS
+	// In windows, we would like to inherit the parent folder permissions by setting mode to USHRT_MAX.
+	local_fd = open(local_path, O_WRONLY | O_CREAT | (resume_flag ? 0 : O_TRUNC), USHRT_MAX);
+#else
 	local_fd = open(local_path,
-	    O_WRONLY | O_CREAT | (resume_flag ? 0 : O_TRUNC), mode | S_IWUSR);
+		O_WRONLY | O_CREAT | (resume_flag ? 0 : O_TRUNC), mode | S_IWUSR);
+#endif // WINDOWS
 	if (local_fd == -1) {
 		error("Couldn't open local file \"%s\" for writing: %s",
 		    local_path, strerror(errno));

@@ -1,4 +1,4 @@
-/* $OpenBSD: sshkey.c,v 1.53 2017/06/28 01:09:22 djm Exp $ */
+/* $OpenBSD: sshkey.c,v 1.57 2017/10/13 06:24:51 djm Exp $ */
 /*
  * Copyright (c) 2000, 2001 Markus Friedl.  All rights reserved.
  * Copyright (c) 2008 Alexander von Gernler.  All rights reserved.
@@ -51,7 +51,6 @@
 #include "ssherr.h"
 #include "misc.h"
 #include "sshbuf.h"
-#include "rsa.h"
 #include "cipher.h"
 #include "digest.h"
 #define SSHKEY_INTERNAL
@@ -66,7 +65,7 @@
 #define KDFNAME			"bcrypt"
 #define AUTH_MAGIC		"openssh-key-v1"
 #define SALT_LEN		16
-#define DEFAULT_CIPHERNAME	"aes256-cbc"
+#define DEFAULT_CIPHERNAME	"aes256-ctr"
 #define	DEFAULT_ROUNDS		16
 
 /* Version identification string for SSH v1 identity files. */
@@ -1987,11 +1986,6 @@ sshkey_from_blob_internal(struct sshbuf *b, struct sshkey **keyp,
 		pk = NULL;
 		break;
 	case KEY_UNSPEC:
-		if ((key = sshkey_new(type)) == NULL) {
-			ret = SSH_ERR_ALLOC_FAIL;
-			goto out;
-		}
-		break;
 	default:
 		ret = SSH_ERR_KEY_TYPE_UNKNOWN;
 		goto out;
@@ -2667,7 +2661,7 @@ sshkey_private_deserialize(struct sshbuf *buf, struct sshkey **kp)
 		    (r = sshbuf_get_bignum2(buf, k->rsa->iqmp)) != 0 ||
 		    (r = sshbuf_get_bignum2(buf, k->rsa->p)) != 0 ||
 		    (r = sshbuf_get_bignum2(buf, k->rsa->q)) != 0 ||
-		    (r = rsa_generate_additional_parameters(k->rsa)) != 0)
+		    (r = ssh_rsa_generate_additional_parameters(k)) != 0)
 			goto out;
 		if (BN_num_bits(k->rsa->n) < SSH_RSA_MINIMUM_MODULUS_SIZE) {
 			r = SSH_ERR_KEY_LENGTH;
@@ -2681,7 +2675,7 @@ sshkey_private_deserialize(struct sshbuf *buf, struct sshkey **kp)
 		    (r = sshbuf_get_bignum2(buf, k->rsa->iqmp)) != 0 ||
 		    (r = sshbuf_get_bignum2(buf, k->rsa->p)) != 0 ||
 		    (r = sshbuf_get_bignum2(buf, k->rsa->q)) != 0 ||
-		    (r = rsa_generate_additional_parameters(k->rsa)) != 0)
+		    (r = ssh_rsa_generate_additional_parameters(k)) != 0)
 			goto out;
 		if (BN_num_bits(k->rsa->n) < SSH_RSA_MINIMUM_MODULUS_SIZE) {
 			r = SSH_ERR_KEY_LENGTH;
@@ -3310,7 +3304,7 @@ sshkey_private_pem_to_blob(struct sshkey *key, struct sshbuf *blob,
 	int blen, len = strlen(_passphrase);
 	u_char *passphrase = (len > 0) ? (u_char *)_passphrase : NULL;
 	const EVP_CIPHER *cipher = (len > 0) ? EVP_aes_128_cbc() : NULL;
-	const u_char *bptr;
+	char *bptr;
 	BIO *bio = NULL;
 
 	if (len > 0 && len <= 4)

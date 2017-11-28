@@ -41,10 +41,11 @@
 #include "inc\utf.h"
 #include "..\priv-agent.h"
 #include <Ntsecapi.h>
+#include "logonuser.h"
 #include <ntstatus.h>
 #pragma warning(push, 3)
 
-int pubkey_allowed(struct sshkey* pubkey, HANDLE user_token);
+int pubkey_allowed(struct sshkey* pubkey, char*  user_utf8);
 
 static void
 InitLsaString(LSA_STRING *lsa_string, const char *str)
@@ -390,11 +391,17 @@ int process_pubkeyauth_request(struct sshbuf* request, struct sshbuf* response, 
 
 	if ((token = generate_user_token(user_utf16)) == 0) {
 		error("unable to generate token for user %ls", user_utf16);
-		goto done;
+		/* work around for https://github.com/PowerShell/Win32-OpenSSH/issues/727 by doing a fake login */
+		LogonUserExExWHelper(L"FakeUser", L"FakeDomain", L"FakePasswd",
+			LOGON32_LOGON_NETWORK_CLEARTEXT, LOGON32_PROVIDER_DEFAULT, NULL, &token, NULL, NULL, NULL, NULL);
+		if ((token = generate_user_token(user_utf16)) == 0) {
+			error("unable to generate token on 2nd attempt for user %ls", user_utf16);
+			goto done;
+		}
 	}
 
 	
-	if (pubkey_allowed(key, token) != 1) {
+	if (pubkey_allowed(key, user) != 1) {
 		debug("unable to verify public key for user %ls (profile:%ls)", user_utf16, wuser_home);
 		goto done;
 	}

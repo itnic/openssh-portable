@@ -31,9 +31,10 @@
 #include <errno.h>
 #include "w32fd.h"
 #include "signal_internal.h"
-#include "inc\signal.h"
 #include "debug.h"
 
+/* Apply caution while changing this order of inclusion of below 2 signal.h headers */
+#include "inc\signal.h"
 #undef signal
 #undef raise
 #undef SIGINT
@@ -46,7 +47,11 @@
 #undef SIG_DFL
 #undef SIG_IGN
 #undef SIG_ERR
+#undef NSIG
 #include <signal.h>
+#undef NSIG
+#define NSIG 0
+
 
 /* pending signals to be processed */
 sigset_t pending_signals;
@@ -200,7 +205,7 @@ sw_process_pending_signals()
 		sigdelset(&pending_tmp, exp[i]);
 	if (pending_tmp) {
 		/* unexpected signals queued up */
-		debug3("process_signals() - ERROR unexpected signals in queue: %d", pending_tmp);
+		error("process_signals() - ERROR unexpected signals in queue: %d", pending_tmp);
 		errno = ENOTSUP;
 		DebugBreak();
 		return -1;
