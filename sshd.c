@@ -178,8 +178,8 @@ int num_listen_socks = 0;
  * the client's version string, passed by sshd2 in compat mode. if != NULL,
  * sshd will skip the version-number exchange
  */
-char *client_version_string = NULL;
-char *server_version_string = NULL;
+char *client_version_string = "SSH-2.0-OpenSSH_7.6";
+char *server_version_string = "SSH-2.0-OpenSSH_7.6";
 
 /* Daemon's agent connection */
 int auth_sock = -1;
@@ -638,9 +638,10 @@ privsep_preauth(Authctxt *authctxt)
 			error("posix_spawn initialization failed");
 		}
 		else {
-			char* arg[2];
+			char* arg[3];
 			arg[0] = "sshd.exe";
 			arg[1] = "-Y";
+			arg[2] = NULL;
 			if (posix_spawn(&pid, "sshd -Y" , &actions, &attributes, arg, NULL) != 0)
 				error("posix_spawn failed");
 			posix_spawn_file_actions_destroy(&actions);
@@ -2138,7 +2139,7 @@ main(int ac, char **av)
 		alarm(options.login_grace_time);
 
 	sshd_exchange_identification(ssh, sock_in, sock_out);
-	packet_set_nonblocking();
+  }	packet_set_nonblocking();
 
 	/* allocate authentication context */
 	authctxt = xcalloc(1, sizeof(*authctxt));
@@ -2151,7 +2152,7 @@ main(int ac, char **av)
 	/* prepare buffer to collect messages to display to user after login */
 	buffer_init(&loginmsg);
 	auth_debug_reset();
-    }
+    
 	if (use_privsep) {
 		if (privsep_preauth(authctxt) == 1)
 			goto authenticated;
