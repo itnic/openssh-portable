@@ -720,8 +720,6 @@ privsep_preauth(Authctxt *authctxt)
 static void
 privsep_postauth(Authctxt *authctxt)
 {
-	return;
-#if (0)
 #ifdef DISABLE_FD_PASSING
 	if (1) {
 #else
@@ -770,7 +768,6 @@ privsep_postauth(Authctxt *authctxt)
 	 * this information is not part of the key state.
 	 */
 	packet_set_authenticated();
-#endif
 }
 
 #endif  /* !WINDOWS */
