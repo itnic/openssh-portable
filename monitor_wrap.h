@@ -85,6 +85,8 @@ void mm_session_pty_cleanup2(struct Session *);
 struct newkeys *mm_newkeys_from_blob(u_char *, int);
 int mm_newkeys_to_blob(int, u_char **, u_int *);
 
+void monitor_send_keystate(struct monitor*);
+void monitor_recv_keystate(struct monitor*);
 void monitor_clear_keystate(struct monitor *);
 void monitor_apply_keystate(struct monitor *);
 void mm_get_keystate(struct monitor *);

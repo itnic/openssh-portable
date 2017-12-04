@@ -720,54 +720,96 @@ privsep_preauth(Authctxt *authctxt)
 static void
 privsep_postauth(Authctxt *authctxt)
 {
-#ifdef DISABLE_FD_PASSING
-	if (1) {
-#else
-	if (authctxt->pw->pw_uid == 0) {
-#endif
-		/* File descriptor passing is broken or root login */
-		use_privsep = 0;
-		goto skip;
-	}
+//#ifdef DISABLE_FD_PASSING
+//	if (1) {
+//#else
+//	if (authctxt->pw->pw_uid == 0) {
+//#endif
+//		/* File descriptor passing is broken or root login */
+//		use_privsep = 0;
+//		goto skip;
+//	}
 
 	/* New socket pair */
 	monitor_reinit(pmonitor);
 
-	pmonitor->m_pid = fork();
-	if (pmonitor->m_pid == -1)
-		fatal("fork of unprivileged child failed");
-	else if (pmonitor->m_pid != 0) {
-		verbose("User child is on pid %ld", (long)pmonitor->m_pid);
-		buffer_clear(&loginmsg);
+   if (!is_authchild) { /* parent */
+		posix_spawn_file_actions_t actions;
+		posix_spawnattr_t attributes;
+
+		if (posix_spawn_file_actions_init(&actions) != 0 ||
+			posix_spawn_file_actions_adddup2(&actions, pmonitor->m_recvfd, STDIN_FILENO) != 0 ||
+			posix_spawn_file_actions_adddup2(&actions, tmp_sock, STDOUT_FILENO) != 0 ||
+			posix_spawnattr_init(&attributes) != 0 ||
+			posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP) != 0 ||
+			posix_spawnattr_setpgroup(&attributes, 0) != 0) {
+			error("posix_spawn initialization failed");
+		}
+		else {
+			char* arg[3];
+			arg[0] = "sshd.exe";
+			arg[1] = "-Z";
+			arg[2] = NULL;
+			if (posix_spawn(&pmonitor->m_pid, "sshd -Z", &actions, &attributes, arg, NULL) != 0)
+				error("posix_spawn failed");
+			posix_spawn_file_actions_destroy(&actions);
+		}
+
+		monitor_send_keystate(pmonitor);
 		monitor_clear_keystate(pmonitor);
 		monitor_child_postauth(pmonitor);
-
 		/* NEVERREACHED */
 		exit(0);
 	}
+   close(pmonitor->m_sendfd);
+   close(pmonitor->m_recvfd);
 
-	/* child */
+   pmonitor->m_recvfd = dup(STDIN_FILENO);
+   authctxt->pw = w32_getpwuid(1);
+   authctxt->valid = 1;
+   
+   monitor_recv_keystate(pmonitor);
+   monitor_apply_keystate(pmonitor);
+   packet_set_authenticated();
+   return;
 
-	close(pmonitor->m_sendfd);
-	pmonitor->m_sendfd = -1;
 
-	/* Demote the private keys to public keys. */
-	demote_sensitive_data();
+	//
+	//pmonitor->m_pid = fork();
+	//if (pmonitor->m_pid == -1)
+	//	fatal("fork of unprivileged child failed");
+	//else if (pmonitor->m_pid != 0) {
+	//	verbose("User child is on pid %ld", (long)pmonitor->m_pid);
+	//	buffer_clear(&loginmsg);
+	//	monitor_clear_keystate(pmonitor);
+	//	monitor_child_postauth(pmonitor);
 
-	reseed_prngs();
+	//	/* NEVERREACHED */
+	//	exit(0);
+	//}
 
-	/* Drop privileges */
-	do_setusercontext(authctxt->pw);
+	///* child */
 
- skip:
-	/* It is safe now to apply the key state */
-	monitor_apply_keystate(pmonitor);
+	//close(pmonitor->m_sendfd);
+	//pmonitor->m_sendfd = -1;
 
-	/*
-	 * Tell the packet layer that authentication was successful, since
-	 * this information is not part of the key state.
-	 */
-	packet_set_authenticated();
+	///* Demote the private keys to public keys. */
+	//demote_sensitive_data();
+
+	//reseed_prngs();
+
+	///* Drop privileges */
+	//do_setusercontext(authctxt->pw);
+
+ //skip:
+	///* It is safe now to apply the key state */
+	//monitor_apply_keystate(pmonitor);
+
+	///*
+	// * Tell the packet layer that authentication was successful, since
+	// * this information is not part of the key state.
+	// */
+	//packet_set_authenticated();
 }
 
 #endif  /* !WINDOWS */
@@ -1559,6 +1601,10 @@ main(int ac, char **av)
 		case 'Y':
 			is_unprivchild = 1;
 			break;
+		case 'Z' :
+			is_authchild = 1;
+			Sleep(10 * 1000);
+			break;
 		case '4':
 			options.address_family = AF_INET;
 			break;
@@ -2004,6 +2050,7 @@ main(int ac, char **av)
 	if (is_unprivchild || is_authchild) {
 		sock_in = sock_out = dup(STDOUT_FILENO);
 		close(STDOUT_FILENO);
+		startup_pipe = -1;
 	} else if (inetd_flag) {
 		server_accept_inetd(&sock_in, &sock_out);
 	} else {

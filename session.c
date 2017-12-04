@@ -2154,7 +2154,8 @@ session_pty_req(struct ssh *ssh, Session *s)
 
 	/* Allocate a pty and open it. */
 	debug("Allocating pty.");
-	if (!PRIVSEP(pty_allocate(&s->ptyfd, &s->ttyfd, s->tty,
+	//if (!PRIVSEP(pty_allocate(&s->ptyfd, &s->ttyfd, s->tty,
+	if (!(pty_allocate(&s->ptyfd, &s->ttyfd, s->tty,
 	    sizeof(s->tty)))) {
 		free(s->term);
 		s->term = NULL;
