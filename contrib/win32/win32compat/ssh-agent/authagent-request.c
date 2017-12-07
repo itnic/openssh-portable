@@ -105,7 +105,7 @@ LoadProfile(HANDLE user_token, wchar_t* user, wchar_t* domain) {
 		goto done;
 	}
 	else
-		ret = profileInfo.hProfile;
+		ret = profileInfo.hProfile;	
 done:
 	EnablePrivilege("SeBackupPrivilege", 0);
 	EnablePrivilege("SeRestorePrivilege", 0);
@@ -361,8 +361,10 @@ int process_loadprofile_request(struct sshbuf* request, struct sshbuf* response,
 		*tmp = L'\0';
 	}
 
-	if ((con->profile_handle = LoadProfile(user_token, user_utf16, dom_utf16)) == NULL)
+	if ((con->profile_handle = LoadProfile(user_token, user_utf16, dom_utf16)) == NULL) {
+		debug("profile_handle is NULL");
 		goto done;
+	}
 	
 	con->profile_token = user_token;
 	user_token = NULL;

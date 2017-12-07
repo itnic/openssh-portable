@@ -168,12 +168,13 @@ agent_cleanup_connection(struct agent_connection* con)
 {
 	debug("connection %p clean up", con);
 	CloseHandle(con->pipe_handle);
-        if (con->profile_handle)
-                UnloadUserProfile(con->profile_token, con->profile_handle);
-        if (con->profile_token)
-                CloseHandle(con->profile_token);
-        if (con->client_impersonation_token)
-                CloseHandle(con->client_impersonation_token);
+	if (con->profile_handle)
+		if(UnloadUserProfile(con->profile_token, con->profile_handle) == FALSE)
+			debug("UnloadUserProfile with %d ERROR:%d", GetLastError());
+	if (con->profile_token)
+		CloseHandle(con->profile_token);
+	if (con->client_impersonation_token)
+		CloseHandle(con->client_impersonation_token);
 	if (con->client_process_handle)
 		CloseHandle(con->client_process_handle);
 	free(con);

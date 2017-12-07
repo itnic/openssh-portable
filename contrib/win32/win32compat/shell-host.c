@@ -1257,7 +1257,8 @@ get_default_shell_path()
 
 	if (tmp)
 		free(tmp);
-
+	if (reg_key)
+		RegCloseKey(reg_key);
 	return default_shell_path;
 }
 

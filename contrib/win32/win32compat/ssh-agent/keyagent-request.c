@@ -177,12 +177,12 @@ done:
 		sshkey_free(key);
 	if (thumbprint)
 		free(thumbprint);
-	if (user_root)
-		RegCloseKey(user_root);
-	if (reg)
-		RegCloseKey(reg);
 	if (sub)
 		RegCloseKey(sub);
+	if (reg)
+		RegCloseKey(reg);
+	if (user_root)
+		RegCloseKey(user_root);		
 	if (pubkey_blob)
 		free(pubkey_blob);
 	return r;
@@ -234,13 +234,12 @@ done:
 		sshkey_free(prikey);
 	if (thumbprint)
 		free(thumbprint);
-	if (user_root)
-		RegCloseKey(user_root);
-	if (reg)
-		RegCloseKey(reg);
 	if (sub)
 		RegCloseKey(sub);
-
+	if (reg)
+		RegCloseKey(reg);
+	if (user_root)
+		RegCloseKey(user_root);
 	return success ? 0 : -1;
 }
 
@@ -424,12 +423,12 @@ done:
 		free(comment);
 	if (identities)
 		sshbuf_free(identities);
-	if (user_root)
-		RegCloseKey(user_root);
-	if (root)
-		RegCloseKey(root);
 	if (sub)
 		RegCloseKey(sub);
+	if (root)
+		RegCloseKey(root);
+	if (user_root)
+		RegCloseKey(user_root);	
 	return r;
 }
 
