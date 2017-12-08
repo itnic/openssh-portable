@@ -594,6 +594,8 @@ privsep_preauth_child(void)
 	}
 }
 
+#include <LMaccess.h>
+
 static int
 privsep_preauth(Authctxt *authctxt)
 {
@@ -642,8 +644,16 @@ privsep_preauth(Authctxt *authctxt)
 			arg[0] = "sshd.exe";
 			arg[1] = "-Y";
 			arg[2] = NULL;
+			{
+				HANDLE h;
+				//create a token for sshd service account
+				//LogonUserA("sshduser", NULL, "password", LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &h);
+				//LogonUserExExWHelper("sshd", "nt service", SERVICE_ACCOUNT_PASSWORD, LOGON32_LOGON_SERVICE, LOGON32_PROVIDER_DEFAULT, NULL, &h, NULL, NULL, NULL, NULL);
+				ImpersonateLoggedOnUser(h);
+			}
 			if (posix_spawn(&pid, "sshd -Y" , &actions, &attributes, arg, NULL) != 0)
 				error("posix_spawn failed");
+			RevertToSelf();
 			posix_spawn_file_actions_destroy(&actions);
 		}
 		monitor_child_preauth(authctxt, pmonitor);
@@ -750,8 +760,10 @@ privsep_postauth(Authctxt *authctxt)
 			arg[0] = "sshd.exe";
 			arg[1] = "-Z";
 			arg[2] = NULL;
+			ImpersonateLoggedOnUser(authctxt->auth_token);
 			if (posix_spawn(&pmonitor->m_pid, "sshd -Z", &actions, &attributes, arg, NULL) != 0)
 				error("posix_spawn failed");
+			RevertToSelf();
 			posix_spawn_file_actions_destroy(&actions);
 		}
 
@@ -1600,6 +1612,7 @@ main(int ac, char **av)
 		switch (opt) {
 		case 'Y':
 			is_unprivchild = 1;
+			Sleep(10 * 1000);
 			break;
 		case 'Z' :
 			is_authchild = 1;
@@ -1871,7 +1884,10 @@ main(int ac, char **av)
 	for (i = 0; i < options.num_host_key_files; i++) {
 		if (options.host_key_files[i] == NULL)
 			continue;
-		key = key_load_private(options.host_key_files[i], "", NULL);
+		if (is_unprivchild || is_authchild)
+			key = NULL;
+		else
+			key = key_load_private(options.host_key_files[i], "", NULL);
 		pubkey = key_load_public(options.host_key_files[i], NULL);
 
 		if (pubkey == NULL && key != NULL)
@@ -1885,6 +1901,8 @@ main(int ac, char **av)
 			keytype = pubkey->type;
 		} else if (key != NULL) {
 			keytype = key->type;
+		} else if ( (is_authchild || is_unprivchild) && pubkey ) {
+			//do nothing
 		} else {
 			error("Could not load host key: %s",
 			    options.host_key_files[i]);
@@ -1909,7 +1927,7 @@ main(int ac, char **av)
 		    key ? "private" : "agent", i, sshkey_ssh_name(pubkey), fp);
 		free(fp);
 	}
-	if (!sensitive_data.have_ssh2_key) {
+	if (!sensitive_data.have_ssh2_key && !is_authchild && !is_unprivchild) {
 		logit("sshd: no hostkeys available -- exiting.");
 		exit(1);
 	}

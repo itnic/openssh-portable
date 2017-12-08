@@ -1154,8 +1154,14 @@ spawn_child(char* cmd, char** argv, int in, int out, int err, unsigned long flag
 	if (_putenv_s(POSIX_STATE_ENV, fd_info) != 0)
 		goto cleanup;
 
+	HANDLE tok1, tok2;
+	OpenThreadToken(GetCurrentThread(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, TRUE, &tok1);
+	DuplicateTokenEx(tok1, TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, NULL, SecurityImpersonation, TokenPrimary, &tok2);
 	debug3("spawning %ls", cmdline_utf16);
-	b = CreateProcessW(NULL, cmdline_utf16, NULL, NULL, TRUE, flags, NULL, NULL, &si, &pi);
+
+	b = CreateProcessAsUserW(tok2, NULL, cmdline_utf16, NULL, NULL, TRUE, flags, NULL, NULL, &si, &pi);
+	CloseHandle(tok1);
+	CloseHandle(tok2);
 	_putenv_s(POSIX_STATE_ENV, "");
 
 	if (b) {
