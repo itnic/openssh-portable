@@ -72,6 +72,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <limits.h>
+#include <spawn.h>
 
 #ifdef WITH_OPENSSL
 #include <openssl/dh.h>
@@ -122,12 +123,6 @@
 #include "version.h"
 #include "ssherr.h"
 
-/* Re-exec fds */
-#define REEXEC_DEVCRYPTO_RESERVED_FD	(STDERR_FILENO + 1)
-#define REEXEC_STARTUP_PIPE_FD		(STDERR_FILENO + 2)
-#define REEXEC_CONFIG_PASS_FD		(STDERR_FILENO + 3)
-#define REEXEC_MIN_FREE_FD		(STDERR_FILENO + 4)
-
 extern char *__progname;
 
 /* Server configuration options. */
@@ -167,12 +162,7 @@ int saved_argc;
 
 /* re-exec */
 int rexeced_flag = 0;
-#ifdef WINDOWS
-/* rexec is not applicable in Windows */
-int rexec_flag = 0;
-#else /* !WINDOWS */
 int rexec_flag = 1;
-#endif /* !WINDOWS */
 int rexec_argc = 0;
 char **rexec_argv;
 
@@ -188,12 +178,16 @@ int num_listen_socks = 0;
  * the client's version string, passed by sshd2 in compat mode. if != NULL,
  * sshd will skip the version-number exchange
  */
-char *client_version_string = NULL;
-char *server_version_string = NULL;
+char *client_version_string = "SSH-2.0-OpenSSH_7.6";
+char *server_version_string = "SSH-2.0-OpenSSH_7.6";
 
 /* Daemon's agent connection */
 int auth_sock = -1;
 int have_agent = 0;
+
+int is_unprivchild = 0;
+int is_authchild = 0;
+int tmp_sock = 0;
 
 /*
  * Any really sensitive data in the application is contained in this
@@ -229,7 +223,7 @@ int *startup_pipes = NULL;
 int startup_pipe;		/* in child */
 
 /* variables used for privilege separation */
-#ifdef WINDOWS
+#ifdef WINDOWS_OLD
 /* Windows does not use Unix privilege separation model */
 int use_prevsep = 0;
 #else
@@ -255,9 +249,6 @@ Buffer loginmsg;
 
 /* Unprivileged user */
 struct passwd *privsep_pw = NULL;
-
-/* is child process - used by Windows implementation*/
-int is_child = 0;
 
 /* Prototypes for various functions defined later in this file. */
 void destroy_sensitive_data(void);
@@ -542,7 +533,7 @@ reseed_prngs(void)
 	explicit_bzero(rnd, sizeof(rnd));
 }
 
-#ifdef WINDOWS
+#ifdef WINDOWS__
 /* 
  * No-OP defs for preauth routines for Windows 
  * these should go away once the privilege separation 
@@ -603,6 +594,8 @@ privsep_preauth_child(void)
 	}
 }
 
+#include <LMaccess.h>
+
 static int
 privsep_preauth(Authctxt *authctxt)
 {
@@ -615,6 +608,67 @@ privsep_preauth(Authctxt *authctxt)
 	/* Store a pointer to the kex for later rekeying */
 	pmonitor->m_pkex = &active_state->kex;
 
+	if (is_authchild)
+		return 1;
+	else if (is_unprivchild) {
+		close(pmonitor->m_sendfd);
+		close(pmonitor->m_log_recvfd);
+		close(pmonitor->m_recvfd);
+		close(pmonitor->m_log_sendfd);
+
+		pmonitor->m_recvfd = dup(STDIN_FILENO);
+		pmonitor->m_log_sendfd = dup(STDERR_FILENO);
+
+		/* Arrange for logging to be sent to the monitor */
+		set_log_handler(mm_log_handler, pmonitor);
+
+		privsep_preauth_child();
+		setproctitle("%s", "[net]");
+		return 0;
+	}
+	else { /* parent */
+		posix_spawn_file_actions_t actions;
+		posix_spawnattr_t attributes;
+
+		if (posix_spawn_file_actions_init(&actions) != 0 ||
+			posix_spawn_file_actions_adddup2(&actions, pmonitor->m_recvfd, STDIN_FILENO) != 0 ||
+			posix_spawn_file_actions_adddup2(&actions, tmp_sock, STDOUT_FILENO) != 0 ||
+			posix_spawn_file_actions_adddup2(&actions, pmonitor->m_log_sendfd, STDERR_FILENO) != 0 ||
+			posix_spawnattr_init(&attributes) != 0 ||
+			posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP) != 0 ||
+			posix_spawnattr_setpgroup(&attributes, 0) != 0) {
+			error("posix_spawn initialization failed");
+		}
+		else {
+			char* arg[3];
+			arg[0] = "sshd.exe";
+			arg[1] = "-Y";
+			arg[2] = NULL;
+			{
+				HANDLE h;
+				//create a token for sshd service account
+				//LogonUserA("sshduser", NULL, "password", LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &h);
+				//LogonUserExExWHelper("sshd", "nt service", SERVICE_ACCOUNT_PASSWORD, LOGON32_LOGON_SERVICE, LOGON32_PROVIDER_DEFAULT, NULL, &h, NULL, NULL, NULL, NULL);
+				ImpersonateLoggedOnUser(h);
+			}
+			if (posix_spawn(&pid, "sshd -Y" , &actions, &attributes, arg, NULL) != 0)
+				error("posix_spawn failed");
+			RevertToSelf();
+			posix_spawn_file_actions_destroy(&actions);
+		}
+		monitor_child_preauth(authctxt, pmonitor);
+		while (waitpid(pid, &status, 0) < 0) {
+			if (errno == EINTR)
+				continue;
+			pmonitor->m_pid = -1;
+			fatal("%s: waitpid: %s", __func__, strerror(errno));
+		}
+		privsep_is_preauth = 0;
+		pmonitor->m_pid = -1;
+		return 1;
+	}
+
+#if (0)
 	if (use_privsep == PRIVSEP_ON)
 		box = ssh_sandbox_init(pmonitor);
 	pid = fork();
@@ -670,59 +724,104 @@ privsep_preauth(Authctxt *authctxt)
 
 		return 0;
 	}
+#endif
 }
 
 static void
 privsep_postauth(Authctxt *authctxt)
 {
-#ifdef DISABLE_FD_PASSING
-	if (1) {
-#else
-	if (authctxt->pw->pw_uid == 0) {
-#endif
-		/* File descriptor passing is broken or root login */
-		use_privsep = 0;
-		goto skip;
-	}
+//#ifdef DISABLE_FD_PASSING
+//	if (1) {
+//#else
+//	if (authctxt->pw->pw_uid == 0) {
+//#endif
+//		/* File descriptor passing is broken or root login */
+//		use_privsep = 0;
+//		goto skip;
+//	}
 
 	/* New socket pair */
 	monitor_reinit(pmonitor);
 
-	pmonitor->m_pid = fork();
-	if (pmonitor->m_pid == -1)
-		fatal("fork of unprivileged child failed");
-	else if (pmonitor->m_pid != 0) {
-		verbose("User child is on pid %ld", (long)pmonitor->m_pid);
-		buffer_clear(&loginmsg);
+   if (!is_authchild) { /* parent */
+		posix_spawn_file_actions_t actions;
+		posix_spawnattr_t attributes;
+
+		if (posix_spawn_file_actions_init(&actions) != 0 ||
+			posix_spawn_file_actions_adddup2(&actions, pmonitor->m_recvfd, STDIN_FILENO) != 0 ||
+			posix_spawn_file_actions_adddup2(&actions, tmp_sock, STDOUT_FILENO) != 0 ||
+			posix_spawnattr_init(&attributes) != 0 ||
+			posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP) != 0 ||
+			posix_spawnattr_setpgroup(&attributes, 0) != 0) {
+			error("posix_spawn initialization failed");
+		}
+		else {
+			char* arg[3];
+			arg[0] = "sshd.exe";
+			arg[1] = "-Z";
+			arg[2] = NULL;
+			ImpersonateLoggedOnUser(authctxt->auth_token);
+			if (posix_spawn(&pmonitor->m_pid, "sshd -Z", &actions, &attributes, arg, NULL) != 0)
+				error("posix_spawn failed");
+			RevertToSelf();
+			posix_spawn_file_actions_destroy(&actions);
+		}
+
+		monitor_send_keystate(pmonitor);
 		monitor_clear_keystate(pmonitor);
 		monitor_child_postauth(pmonitor);
-
 		/* NEVERREACHED */
 		exit(0);
 	}
+   close(pmonitor->m_sendfd);
+   close(pmonitor->m_recvfd);
 
-	/* child */
+   pmonitor->m_recvfd = dup(STDIN_FILENO);
+   authctxt->pw = w32_getpwuid(1);
+   authctxt->valid = 1;
+   
+   monitor_recv_keystate(pmonitor);
+   monitor_apply_keystate(pmonitor);
+   packet_set_authenticated();
+   return;
 
-	close(pmonitor->m_sendfd);
-	pmonitor->m_sendfd = -1;
 
-	/* Demote the private keys to public keys. */
-	demote_sensitive_data();
+	//
+	//pmonitor->m_pid = fork();
+	//if (pmonitor->m_pid == -1)
+	//	fatal("fork of unprivileged child failed");
+	//else if (pmonitor->m_pid != 0) {
+	//	verbose("User child is on pid %ld", (long)pmonitor->m_pid);
+	//	buffer_clear(&loginmsg);
+	//	monitor_clear_keystate(pmonitor);
+	//	monitor_child_postauth(pmonitor);
 
-	reseed_prngs();
+	//	/* NEVERREACHED */
+	//	exit(0);
+	//}
 
-	/* Drop privileges */
-	do_setusercontext(authctxt->pw);
+	///* child */
 
- skip:
-	/* It is safe now to apply the key state */
-	monitor_apply_keystate(pmonitor);
+	//close(pmonitor->m_sendfd);
+	//pmonitor->m_sendfd = -1;
 
-	/*
-	 * Tell the packet layer that authentication was successful, since
-	 * this information is not part of the key state.
-	 */
-	packet_set_authenticated();
+	///* Demote the private keys to public keys. */
+	//demote_sensitive_data();
+
+	//reseed_prngs();
+
+	///* Drop privileges */
+	//do_setusercontext(authctxt->pw);
+
+ //skip:
+	///* It is safe now to apply the key state */
+	//monitor_apply_keystate(pmonitor);
+
+	///*
+	// * Tell the packet layer that authentication was successful, since
+	// * this information is not part of the key state.
+	// */
+	//packet_set_authenticated();
 }
 
 #endif  /* !WINDOWS */
@@ -1033,11 +1132,9 @@ server_accept_inetd(int *sock_in, int *sock_out)
 
 	startup_pipe = -1;
 	if (rexeced_flag) {
-		close(REEXEC_CONFIG_PASS_FD);
-		*sock_in = *sock_out = dup(STDIN_FILENO);
+		*sock_in = *sock_out = dup(STDOUT_FILENO);
 		if (!debug_flag) {
-			startup_pipe = dup(REEXEC_STARTUP_PIPE_FD);
-			close(REEXEC_STARTUP_PIPE_FD);
+			startup_pipe = dup(STDIN_FILENO);
 		}
 	} else {
 		*sock_in = dup(STDIN_FILENO);
@@ -1159,7 +1256,7 @@ server_listen(void)
  * from this function are in a forked subprocess.
  */
 static void
-server_accept_loop(int *sock_in, int *sock_out, int *newsock, int *config_s)
+server_accept_loop(int *sock_in, int *sock_out, int *newsock)
 {
 	fd_set *fdset;
 	int i, j, ret, maxfd;
@@ -1169,6 +1266,7 @@ server_accept_loop(int *sock_in, int *sock_out, int *newsock, int *config_s)
 	socklen_t fromlen;
 	pid_t pid;
 	u_char rnd[256];
+
 
 	/* setup fd set for accept */
 	fdset = NULL;
@@ -1258,20 +1356,13 @@ server_accept_loop(int *sock_in, int *sock_out, int *newsock, int *config_s)
 				close(*newsock);
 				continue;
 			}
-			if (pipe(startup_p) == -1) {
+			if (socketpair(AF_UNIX,
+				SOCK_STREAM, 0, startup_p) == -1) {
 				close(*newsock);
 				continue;
 			}
 
-			if (rexec_flag && socketpair(AF_UNIX,
-			    SOCK_STREAM, 0, config_s) == -1) {
-				error("reexec socketpair: %s",
-				    strerror(errno));
-				close(*newsock);
-				close(startup_p[0]);
-				close(startup_p[1]);
-				continue;
-			}
+			fcntl(startup_p[0], F_SETFD, FD_CLOEXEC);
 
 			for (j = 0; j < options.max_startups; j++)
 				if (startup_pipes[j] == -1) {
@@ -1282,16 +1373,14 @@ server_accept_loop(int *sock_in, int *sock_out, int *newsock, int *config_s)
 					break;
 				}
 
-			/*
-			 * Got connection.  Fork a child to handle it, unless
-			 * we are in debugging mode.
-			 */
+			/* Process connection */
+			
 			if (debug_flag) {
 				/*
-				 * In debugging mode.  Close the listening
-				 * socket, and start processing the
-				 * connection without forking.
-				 */
+				* In debugging mode.  Close the listening
+				* socket, and start processing the
+				* connection without forking.
+				*/
 				debug("Server will not fork when running in debugging mode.");
 				close_listen_socks();
 				*sock_in = *newsock;
@@ -1299,106 +1388,73 @@ server_accept_loop(int *sock_in, int *sock_out, int *newsock, int *config_s)
 				close(startup_p[0]);
 				close(startup_p[1]);
 				startup_pipe = -1;
-				pid = getpid();
-				if (rexec_flag) {
-					send_rexec_state(config_s[0],
-					    &cfg);
-					close(config_s[0]);
-				}
 				break;
+
 			}
+			else if (rexec_flag) { /* re-spawn sshd */
+				posix_spawn_file_actions_t actions;
+				posix_spawnattr_t attributes;
 
-			/*
-			 * Normal production daemon.  Fork, and have
-			 * the child process the connection. The
-			 * parent continues listening.
-			 */
-			platform_pre_fork();
-#ifdef WINDOWS
-			/* 
-			* fork() repleacement for Windows -
-			* - Put accepted socket in a env varaibale
-			* - disable inheritance on listening socket and startup fds
-			* - Spawn child sshd.exe
-			*/
-			{
-				char* path_utf8 = utf16_to_utf8(GetCommandLineW());
-				/* large enough to hold pointer value in hex */
-				char fd_handle[30];  
-
-				if (path_utf8 == NULL)
-					fatal("Failed to alloc memory");
-				
-				if (snprintf(fd_handle, sizeof(fd_handle), "%p", 
-					w32_fd_to_handle(*newsock)) == -1
-				    || SetEnvironmentVariable("SSHD_REMSOC", fd_handle) == FALSE
-				    || snprintf(fd_handle, sizeof(fd_handle), "%p", 
-					w32_fd_to_handle(startup_p[1])) == -1
-				    || SetEnvironmentVariable("SSHD_STARTUPSOC", fd_handle) == FALSE
-				    || fcntl(startup_p[0], F_SETFD, FD_CLOEXEC) == -1) {
-					error("unable to set environment for child");
-					close(*newsock);
-					/* 
-					 * close child end of startup pipe. parent end will 
-					 * automatically be cleaned up on next iteration
-					 */
-					close(startup_p[1]);
-					free(path_utf8);
-					continue;
+				if (posix_spawn_file_actions_init(&actions) != 0 ||
+					posix_spawn_file_actions_adddup2(&actions, startup_p[1], STDIN_FILENO) != 0 ||
+					posix_spawn_file_actions_adddup2(&actions, *newsock, STDOUT_FILENO) != 0 ||
+					posix_spawnattr_init(&attributes) != 0 ||
+					posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP) != 0 ||
+					posix_spawnattr_setpgroup(&attributes, 0) != 0) {
+					error("posix_spawn initialization failed");
 				}
-                
-				pid = spawn_child(path_utf8, NULL, STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO, CREATE_NEW_PROCESS_GROUP);
-				free(path_utf8);
-				close(*newsock);
-				SetEnvironmentVariable("SSHD_REMSOC", NULL);
-				SetEnvironmentVariable("SSHD_STARTUPSOC", NULL);
+				else {
+					if (posix_spawn(&pid, rexec_argv[0], &actions, &attributes, rexec_argv, NULL) != 0)
+						error("posix_spawn failed");
+					posix_spawn_file_actions_destroy(&actions);
+					posix_spawnattr_destroy(&attributes);
+				}
 			}
-#else /* !WINDOWS */
+			else { /* fork off parent */
 
-			if ((pid = fork()) == 0) {
-				/*
-				 * Child.  Close the listening and
-				 * max_startup sockets.  Start using
-				 * the accepted socket. Reinitialize
-				 * logging (since our pid has changed).
-				 * We break out of the loop to handle
-				 * the connection.
-				 */
-				platform_post_fork_child();
-				startup_pipe = startup_p[1];
-				close_startup_pipes();
-				close_listen_socks();
-				*sock_in = *newsock;
-				*sock_out = *newsock;
-				log_init(__progname,
-				    options.log_level,
-				    options.log_facility,
-				    log_stderr);
-				if (rexec_flag)
-					close(config_s[0]);
-				break;
+				platform_pre_fork();
+
+				if ((pid = fork()) == 0) {
+					/*
+					* Child.  Close the listening and
+					* max_startup sockets.  Start using
+					* the accepted socket. Reinitialize
+					* logging (since our pid has changed).
+					* We break out of the loop to handle
+					* the connection.
+					*/
+					platform_post_fork_child();
+					startup_pipe = startup_p[1];
+					close_startup_pipes();
+					close_listen_socks();
+					*sock_in = *newsock;
+					*sock_out = *newsock;
+					log_init(__progname,
+						options.log_level,
+						options.log_facility,
+						log_stderr);
+					break;
+				} else {
+					/* Parent */
+					platform_post_fork_parent(pid);
+					if (pid < 0)
+						error("fork: %.100s", strerror(errno));
+					else
+						debug("Forked child %ld.", (long)pid);
+				}
 			}
-#endif /* !WINDOWS */
-			/* Parent.  Stay in the loop. */
-			platform_post_fork_parent(pid);
-			if (pid < 0)
-				error("fork: %.100s", strerror(errno));
-			else
-				debug("Forked child %ld.", (long)pid);
 
+			/* parent */
 			close(startup_p[1]);
-
-			if (rexec_flag) {
-				send_rexec_state(config_s[0], &cfg);
-				close(config_s[0]);
-				close(config_s[1]);
-			}
 			close(*newsock);
 
+			if (rexec_flag)
+				send_rexec_state(startup_p[0], &cfg);
+
 			/*
-			 * Ensure that our random state differs
-			 * from that of the child
-			 */
+			* Ensure that our random state differs
+			* from that of the child
+			*/
 			arc4random_stir();
 			arc4random_buf(rnd, sizeof(rnd));
 #ifdef WITH_OPENSSL
@@ -1407,6 +1463,7 @@ server_accept_loop(int *sock_in, int *sock_out, int *newsock, int *config_s)
 				fatal("%s: RAND_bytes failed", __func__);
 #endif
 			explicit_bzero(rnd, sizeof(rnd));
+
 		}
 
 		/* child process check (or debug mode) */
@@ -1510,7 +1567,6 @@ main(int ac, char **av)
 	int sock_in = -1, sock_out = -1, newsock = -1;
 	const char *remote_ip, *rdomain;
 	char *fp, *line, *laddr, *logfile = NULL;
-	int config_s[2] = { -1 , -1 };
 	u_int i, j;
 	u_int64_t ibytes, obytes;
 	mode_t new_umask;
@@ -1552,8 +1608,16 @@ main(int ac, char **av)
 
 	/* Parse command-line arguments. */
 	while ((opt = getopt(ac, av,
-	    "C:E:b:c:f:g:h:k:o:p:u:46DQRTdeiqrt")) != -1) {
+	    "C:E:b:c:f:g:h:k:o:p:u:46DQRTdeiqrtYZ")) != -1) {
 		switch (opt) {
+		case 'Y':
+			is_unprivchild = 1;
+			Sleep(10 * 1000);
+			break;
+		case 'Z' :
+			is_authchild = 1;
+			Sleep(10 * 1000);
+			break;
 		case '4':
 			options.address_family = AF_INET;
 			break;
@@ -1661,12 +1725,14 @@ main(int ac, char **av)
 	}
 	if (rexeced_flag || inetd_flag)
 		rexec_flag = 0;
-	if (!test_flag && (rexec_flag && (av[0] == NULL || *av[0] != '/')))
+	if (!test_flag && !debug_flag && rexec_flag && 
+#ifdef WINDOWS
+	    (av[0] == NULL || *av[0] == '\0' || av[0][1] != ':'))
+#else
+	    (av[0] == NULL || *av[0] != '/'))
+#endif
 		fatal("sshd re-exec requires execution with an absolute path");
-	if (rexeced_flag)
-		closefrom(REEXEC_MIN_FREE_FD);
-	else
-		closefrom(REEXEC_DEVCRYPTO_RESERVED_FD);
+	closefrom(STDERR_FILENO + 1);
 
 #ifdef WITH_OPENSSL
 	OpenSSL_add_all_algorithms();
@@ -1713,7 +1779,7 @@ main(int ac, char **av)
 	/* Fetch our configuration */
 	buffer_init(&cfg);
 	if (rexeced_flag)
-		recv_rexec_state(REEXEC_CONFIG_PASS_FD, &cfg);
+		recv_rexec_state(STDIN_FILENO, &cfg);
 	else if (strcasecmp(config_file_name, "none") != 0)
 		load_server_config(config_file_name, &cfg);
 
@@ -1818,7 +1884,10 @@ main(int ac, char **av)
 	for (i = 0; i < options.num_host_key_files; i++) {
 		if (options.host_key_files[i] == NULL)
 			continue;
-		key = key_load_private(options.host_key_files[i], "", NULL);
+		if (is_unprivchild || is_authchild)
+			key = NULL;
+		else
+			key = key_load_private(options.host_key_files[i], "", NULL);
 		pubkey = key_load_public(options.host_key_files[i], NULL);
 
 		if (pubkey == NULL && key != NULL)
@@ -1832,6 +1901,8 @@ main(int ac, char **av)
 			keytype = pubkey->type;
 		} else if (key != NULL) {
 			keytype = key->type;
+		} else if ( (is_authchild || is_unprivchild) && pubkey ) {
+			//do nothing
 		} else {
 			error("Could not load host key: %s",
 			    options.host_key_files[i]);
@@ -1856,7 +1927,7 @@ main(int ac, char **av)
 		    key ? "private" : "agent", i, sshkey_ssh_name(pubkey), fp);
 		free(fp);
 	}
-	if (!sensitive_data.have_ssh2_key) {
+	if (!sensitive_data.have_ssh2_key && !is_authchild && !is_unprivchild) {
 		logit("sshd: no hostkeys available -- exiting.");
 		exit(1);
 	}
@@ -1994,14 +2065,14 @@ main(int ac, char **av)
 	signal(SIGPIPE, SIG_IGN);
 
 	/* Get a connection, either from inetd or a listening TCP socket */
-	if (inetd_flag) {
+	if (is_unprivchild || is_authchild) {
+		sock_in = sock_out = dup(STDOUT_FILENO);
+		close(STDOUT_FILENO);
+		startup_pipe = -1;
+	} else if (inetd_flag) {
 		server_accept_inetd(&sock_in, &sock_out);
 	} else {
 		platform_pre_listen();
-#ifdef WINDOWS
-		/* For Windows child sshd, skip listener */
-		if (is_child == 0)
-#endif /* WINDOWS */
 		server_listen();
 
 		signal(SIGHUP, sighup_handler);
@@ -2025,30 +2096,9 @@ main(int ac, char **av)
 			}
 		}
 
-#ifdef WINDOWS
-      /* Windows - for sshd child, pick up the accepted socket*/
-      if (is_child) {
-		char *stopstring;
-		DWORD_PTR handle;
-
-		handle = strtol(getenv("SSHD_REMSOC"), &stopstring, 16);
-		SetEnvironmentVariable("SSHD_REMSOC", NULL);
-		debug("child socket: %d", handle);
-		sock_in = sock_out = newsock = w32_allocate_fd_for_handle((HANDLE)handle, TRUE);
-		fcntl(newsock, F_SETFD, FD_CLOEXEC);
-
-		handle = strtol(getenv("SSHD_STARTUPSOC"), &stopstring, 16);
-		SetEnvironmentVariable("SSHD_STARTUPSOC", NULL);
-		debug("child startup_pipe: %d", handle); 
-		startup_pipe = w32_allocate_fd_for_handle((HANDLE)handle, FALSE);		
-		fcntl(startup_pipe, F_SETFD, FD_CLOEXEC);
-      }
-	  else /* Windows and Unix sshd parent */
-#endif /* WINDOWS */
-
 		/* Accept a connection and return in a forked child */
 		server_accept_loop(&sock_in, &sock_out,
-		    &newsock, config_s);
+		    &newsock);
 	}
 
 	/* This is the child processing a new connection. */
@@ -2069,48 +2119,9 @@ main(int ac, char **av)
 		error("setsid: %.100s", strerror(errno));
 #endif
 
-	if (rexec_flag) {
-		int fd;
-
-		debug("rexec start in %d out %d newsock %d pipe %d sock %d",
-		    sock_in, sock_out, newsock, startup_pipe, config_s[0]);
-		dup2(newsock, STDIN_FILENO);
-		dup2(STDIN_FILENO, STDOUT_FILENO);
-		if (startup_pipe == -1)
-			close(REEXEC_STARTUP_PIPE_FD);
-		else if (startup_pipe != REEXEC_STARTUP_PIPE_FD) {
-			dup2(startup_pipe, REEXEC_STARTUP_PIPE_FD);
-			close(startup_pipe);
-			startup_pipe = REEXEC_STARTUP_PIPE_FD;
-		}
-
-		dup2(config_s[1], REEXEC_CONFIG_PASS_FD);
-		close(config_s[1]);
-
-		execv(rexec_argv[0], rexec_argv);
-
-		/* Reexec has failed, fall back and continue */
-		error("rexec of %s failed: %s", rexec_argv[0], strerror(errno));
-		recv_rexec_state(REEXEC_CONFIG_PASS_FD, NULL);
-		log_init(__progname, options.log_level,
-		    options.log_facility, log_stderr);
-
-		/* Clean up fds */
-		close(REEXEC_CONFIG_PASS_FD);
-		newsock = sock_out = sock_in = dup(STDIN_FILENO);
-		if ((fd = open(_PATH_DEVNULL, O_RDWR, 0)) != -1) {
-			dup2(fd, STDIN_FILENO);
-			dup2(fd, STDOUT_FILENO);
-			if (fd > STDERR_FILENO)
-				close(fd);
-		}
-		debug("rexec cleanup in %d out %d newsock %d pipe %d sock %d",
-		    sock_in, sock_out, newsock, startup_pipe, config_s[0]);
-	}
-
 	/* Executed child processes don't need these. */
-	fcntl(sock_out, F_SETFD, FD_CLOEXEC);
-	fcntl(sock_in, F_SETFD, FD_CLOEXEC);
+	//fcntl(sock_out, F_SETFD, FD_CLOEXEC);
+	//fcntl(sock_in, F_SETFD, FD_CLOEXEC);
 
 	/*
 	 * Disable the key regeneration alarm.  We will not regenerate the
@@ -2129,6 +2140,7 @@ main(int ac, char **av)
 	 * Register our connection.  This turns encryption off because we do
 	 * not have a key.
 	 */
+	tmp_sock = sock_in;
 	packet_set_connection(sock_in, sock_out);
 	packet_set_server();
 	ssh = active_state; /* XXX */
@@ -2175,6 +2187,7 @@ main(int ac, char **av)
 	    rdomain == NULL ? "" : "\"");
 	free(laddr);
 
+  if(!is_unprivchild && !is_authchild) {
 	/*
 	 * We don't want to listen forever unless the other side
 	 * successfully authenticates itself.  So we set up an alarm which is
@@ -2188,7 +2201,7 @@ main(int ac, char **av)
 		alarm(options.login_grace_time);
 
 	sshd_exchange_identification(ssh, sock_in, sock_out);
-	packet_set_nonblocking();
+  }	packet_set_nonblocking();
 
 	/* allocate authentication context */
 	authctxt = xcalloc(1, sizeof(*authctxt));
@@ -2201,7 +2214,7 @@ main(int ac, char **av)
 	/* prepare buffer to collect messages to display to user after login */
 	buffer_init(&loginmsg);
 	auth_debug_reset();
-
+    
 	if (use_privsep) {
 		if (privsep_preauth(authctxt) == 1)
 			goto authenticated;

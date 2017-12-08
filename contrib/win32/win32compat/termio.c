@@ -265,13 +265,10 @@ syncio_close(struct w32_io* pio)
 	/* drain queued APCs */
 	SleepEx(0, TRUE);
 	CloseHandle(WINHANDLE(pio));
-	/* free up if non stdio */
-	if (!IS_STDIO(pio)) {
-		if (pio->read_details.buf)
-			free(pio->read_details.buf);
-		if (pio->write_details.buf)
-			free(pio->write_details.buf);
-		free(pio);
-	}
+	if (pio->read_details.buf)
+		free(pio->read_details.buf);
+	if (pio->write_details.buf)
+		free(pio->write_details.buf);
+	free(pio);
 	return 0;
 }
