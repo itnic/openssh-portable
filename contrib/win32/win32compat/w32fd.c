@@ -60,65 +60,149 @@ struct w32fd_table {
 /* mapping table*/
 static struct w32fd_table fd_table;
 
-/* static table entries representing std in, out and error*/
-static struct w32_io w32_io_stdin, w32_io_stdout, w32_io_stderr;
-
 /* main thread handle*/
 HANDLE main_thread;
 
 void fd_table_set(struct w32_io* pio, int index);
 
+struct std_fd_state {
+	int num_inherited;
+	char in_type;
+	char out_type;
+	char err_type;
+	char padding;
+};
+
+struct inh_fd_state {
+	int handle;
+	short index;
+	char type;
+	char padding;
+};
+
+#define POSIX_STATE_ENV "c28fc6f98a2c44abbbd89d6a3037d0d9_POSIX_STATE"
+
+static char*
+fd_encode_state(int fd_in, int fd_out, int fd_err, int num_aux_fds, int parent_aux_fds[], int child_aux_fds[], HANDLE aux_h[])
+{
+	char *buf, *encoded;
+	struct std_fd_state *std_fd_state;
+	struct inh_fd_state *inh_fd_state, *c;
+	DWORD len_req;
+	BOOL b;
+	int i;
+
+	buf = malloc(8 * (1 + num_aux_fds));
+	if (!buf) {
+		errno = ENOMEM;
+		return NULL;
+	}
+
+	std_fd_state = (struct std_fd_state *)buf;
+	std_fd_state->num_inherited = num_aux_fds;
+	std_fd_state->in_type = fd_table.w32_ios[fd_in]->type;
+	std_fd_state->out_type = fd_table.w32_ios[fd_out]->type;
+	std_fd_state->err_type = fd_table.w32_ios[fd_err]->type;
+
+	c = (struct inh_fd_state*)(buf + 8);
+	for (i = 0; i < num_aux_fds; i++) {
+		c->handle = (int)(intptr_t)aux_h[i];
+		c->index = child_aux_fds[i];
+		c->type = fd_table.w32_ios[parent_aux_fds[i]]->type;
+		c++;
+	}
+
+	b = CryptBinaryToStringA(buf, 8 * (1 + num_aux_fds), CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, NULL, &len_req);
+	encoded = malloc(len_req);
+	if (!encoded) {
+		errno = ENOMEM;
+		return NULL;
+	}
+	b = CryptBinaryToStringA(buf, 8 * (1 + num_aux_fds), CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, encoded, &len_req);
+
+	return encoded;
+}
+
+static void
+fd_decode_state(char* enc_buf)
+{
+	char* buf;
+	DWORD req, skipped, out_flags;
+	struct std_fd_state *std_fd_state;
+	struct inh_fd_state *inh_fd_state, *c;
+	int i, num_inherited = 0;
+
+	CryptStringToBinary(enc_buf, 0, CRYPT_STRING_BASE64 | CRYPT_STRING_STRICT, NULL, &req, &skipped, &out_flags);
+	buf = malloc(req);
+	CryptStringToBinary(enc_buf, 0, CRYPT_STRING_BASE64 | CRYPT_STRING_STRICT, buf, &req, &skipped, &out_flags);
+
+	std_fd_state = (struct std_fd_state *)buf;
+	fd_table.w32_ios[0]->type = std_fd_state->in_type;
+	if (fd_table.w32_ios[0]->type == SOCK_FD)
+		fd_table.w32_ios[0]->internal.state = SOCK_READY;
+	fd_table.w32_ios[1]->type = std_fd_state->out_type;
+	if (fd_table.w32_ios[1]->type == SOCK_FD)
+		fd_table.w32_ios[1]->internal.state = SOCK_READY;
+	fd_table.w32_ios[2]->type = std_fd_state->err_type;
+	if (fd_table.w32_ios[2]->type == SOCK_FD)
+		fd_table.w32_ios[2]->internal.state = SOCK_READY;
+	num_inherited = std_fd_state->num_inherited;
+
+	c = (struct inh_fd_state*)(buf + 8);
+	while (num_inherited--) {
+		struct w32_io* pio = malloc(sizeof(struct w32_io));
+		ZeroMemory(pio, sizeof(struct w32_io));
+		pio->handle = (void*)(INT_PTR)c->handle;
+		pio->type = c->type;
+		if (pio->type == SOCK_FD)
+			pio->internal.state = SOCK_READY;
+		fd_table_set(pio, c->index);
+		c++;
+	}
+	
+	free(buf);
+	return;
+}
+
 /* initializes mapping table*/
 static int
 fd_table_initialize()
 {
+	char *posix_state;
+	/* table entries representing std in, out and error*/
+	struct w32_io *w32_io_stdin, *w32_io_stdout, *w32_io_stderr;
+
+	w32_io_stdin = malloc(sizeof(struct w32_io));
+	w32_io_stdout = malloc(sizeof(struct w32_io));
+	w32_io_stderr = malloc(sizeof(struct w32_io));
+	if (!w32_io_stdin || !w32_io_stdout || !w32_io_stderr) {
+		errno = ENOMEM;
+		return -1;
+	}
+
 	memset(&fd_table, 0, sizeof(fd_table));
-	memset(&w32_io_stdin, 0, sizeof(w32_io_stdin));
-	w32_io_stdin.std_handle = STD_INPUT_HANDLE;
-	w32_io_stdin.type = NONSOCK_SYNC_FD;
 
-	char *envValue = NULL;
-	size_t len = 0;
-	_dupenv_s(&envValue, &len, SSH_ASYNC_STDIN);
-	if (NULL != envValue) {
-		if(strcmp(envValue, "1") == 0)
-			w32_io_stdin.type = NONSOCK_FD;
-		
-		free(envValue);
+	memset(w32_io_stdin, 0, sizeof(struct w32_io));
+	w32_io_stdin->handle = GetStdHandle(STD_INPUT_HANDLE);
+	w32_io_stdin->type = NONSOCK_SYNC_FD;
+	fd_table_set(w32_io_stdin, STDIN_FILENO);
+
+	memset(w32_io_stdout, 0, sizeof(struct w32_io));
+	w32_io_stdout->handle = GetStdHandle(STD_OUTPUT_HANDLE);
+	w32_io_stdout->type = NONSOCK_SYNC_FD;
+	fd_table_set(w32_io_stdout, STDOUT_FILENO);
+
+	memset(w32_io_stderr, 0, sizeof(struct w32_io));
+	w32_io_stderr->handle = GetStdHandle(STD_ERROR_HANDLE);
+	w32_io_stderr->type = NONSOCK_SYNC_FD;
+	fd_table_set(w32_io_stderr, STDERR_FILENO);
+
+	_dupenv_s(&posix_state, NULL, POSIX_STATE_ENV);
+	if (NULL != posix_state) {
+		fd_decode_state(posix_state);
+		free(posix_state);
+		_putenv_s(POSIX_STATE_ENV, "");
 	}
-
-	_putenv_s(SSH_ASYNC_STDIN, "");
-	fd_table_set(&w32_io_stdin, STDIN_FILENO);
-	memset(&w32_io_stdout, 0, sizeof(w32_io_stdout));
-	w32_io_stdout.std_handle = STD_OUTPUT_HANDLE;
-	w32_io_stdout.type = NONSOCK_SYNC_FD;
-	
-	envValue = NULL;
-	_dupenv_s(&envValue, &len, SSH_ASYNC_STDOUT);
-	if (NULL != envValue) {
-		if(strcmp(envValue, "1") == 0)
-			w32_io_stdout.type = NONSOCK_FD;
-
-		free(envValue);
-	}
-
-	_putenv_s(SSH_ASYNC_STDOUT, "");
-	fd_table_set(&w32_io_stdout, STDOUT_FILENO);
-	memset(&w32_io_stderr, 0, sizeof(w32_io_stderr));
-	w32_io_stderr.std_handle = STD_ERROR_HANDLE;
-	w32_io_stderr.type = NONSOCK_SYNC_FD;
-
-	envValue = NULL;
-	_dupenv_s(&envValue, &len, SSH_ASYNC_STDERR);
-	if (NULL != envValue) {
-		if(strcmp(envValue, "1") == 0)
-			w32_io_stderr.type = NONSOCK_FD;
-
-		free(envValue);
-	}
-
-	_putenv_s(SSH_ASYNC_STDERR, "");
-	fd_table_set(&w32_io_stderr, STDERR_FILENO);
 	return 0;
 }
 
@@ -372,9 +456,34 @@ w32_shutdown(int fd, int how)
 int
 w32_socketpair(int domain, int type, int protocol, int sv[2])
 {
-	errno = ENOTSUP;
-	debug3("socketpair - ERROR not supported");
-	return -1;
+	int p0, p1;
+	struct w32_io* pio[2];
+
+	errno = 0;
+	p0 = fd_table_get_min_index();
+	if (p0 == -1)
+		return -1;
+
+	/*temporarily set occupied bit*/
+	FD_SET(p0, &fd_table.occupied);
+	p1 = fd_table_get_min_index();
+	FD_CLR(p0, &fd_table.occupied);
+	if (p1 == -1)
+		return -1;
+
+	if (-1 == fileio_pipe(pio, 1))
+		return -1;
+
+	pio[0]->type = NONSOCK_FD;
+	pio[1]->type = NONSOCK_FD;
+	fd_table_set(pio[0], p0);
+	fd_table_set(pio[1], p1);
+	sv[0] = p0;
+	sv[1] = p1;
+	debug4("socketpair - r-h:%d,io:%p,fd:%d  w-h:%d,io:%p,fd:%d",
+		pio[0]->handle, pio[0], p0, pio[1]->handle, pio[1], p1);
+
+	return 0;
 }
 
 
@@ -396,7 +505,7 @@ w32_pipe(int *pfds)
 	if (write_index == -1)
 		return -1;
 
-	if (-1 == fileio_pipe(pio))
+	if (-1 == fileio_pipe(pio, 0))
 		return -1;
 
 	pio[0]->type = NONSOCK_FD;
@@ -800,46 +909,54 @@ w32_select(int fds, w32_fd_set* readfds, w32_fd_set* writefds, w32_fd_set* excep
 	return out_ready_fds;
 }
 
+static HANDLE
+dup_handle(int fd) 
+{
+	HANDLE ret = 0;
+	HANDLE h = fd_table.w32_ios[fd]->handle;
+	int is_sock = fd_table.w32_ios[fd]->type == SOCK_FD;
+
+	if (is_sock) {
+		SOCKET dup_sock;
+		SOCKET sock = (SOCKET)h;
+		WSAPROTOCOL_INFOW info;
+		WSADuplicateSocketW(sock, GetCurrentProcessId(), &info);
+		dup_sock = WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &info, 0, 0);
+		ret = (HANDLE)dup_sock;
+	}
+	else {
+		HANDLE dup_handle;
+		if (!DuplicateHandle(GetCurrentProcess(), h, GetCurrentProcess(), &dup_handle, 0, TRUE, DUPLICATE_SAME_ACCESS)) {
+			errno = EOTHER;
+			debug3("dup - ERROR: DuplicatedHandle() :%d", GetLastError());
+		}
+		ret = dup_handle;
+	}
+	return ret;
+}
+
 int
 w32_dup(int oldfd)
 {
 	int min_index;
 	struct w32_io* pio;
-	HANDLE src, target;
 	CHECK_FD(oldfd);
-	if (oldfd > STDERR_FILENO) {
-		errno = EOPNOTSUPP;
-		debug3("dup - ERROR: supports only std io, fd:%d", oldfd);
-		return -1;
-	}
 
 	if ((min_index = fd_table_get_min_index()) == -1)
 		return -1;
 
-	src = GetStdHandle(fd_table.w32_ios[oldfd]->std_handle);
-	if (src == INVALID_HANDLE_VALUE) {
-		errno = EINVAL;
-		debug3("dup - ERROR: unable to get underlying handle for std fd:%d", oldfd);
-		return -1;
-	}
-
-	if (!DuplicateHandle(GetCurrentProcess(), src, GetCurrentProcess(), &target, 0, TRUE, DUPLICATE_SAME_ACCESS)) {
-		errno = EOTHER;
-		debug3("dup - ERROR: DuplicatedHandle() :%d", GetLastError());
-		return -1;
-	}
-
 	pio = (struct w32_io*) malloc(sizeof(struct w32_io));
 	if (pio == NULL) {
-		CloseHandle(target);
 		errno = ENOMEM;
-		debug3("dup - ERROR: %d", errno);
 		return -1;
 	}
 
 	memset(pio, 0, sizeof(struct w32_io));
-	pio->handle = target;
+	if ((pio->handle = dup_handle(oldfd)) == 0)
+		return -1;
 	pio->type = fd_table.w32_ios[oldfd]->type;
+	if (pio->type == SOCK_FD)
+		pio->internal.state = SOCK_READY;
 	fd_table_set(pio, min_index);
 	return min_index;
 }
@@ -847,47 +964,30 @@ w32_dup(int oldfd)
 int
 w32_dup2(int oldfd, int newfd)
 {
+	struct w32_io* pio;
 	CHECK_FD(oldfd);
-	errno = EOPNOTSUPP;
-	debug3("dup2 - ERROR: not implemented yet");
-	return -1;
+
+	if (fd_table.w32_ios[newfd])
+		w32_close(newfd);
+
+	pio = malloc(sizeof(struct w32_io));
+	ZeroMemory(pio, sizeof(struct w32_io));
+	pio->type = fd_table.w32_ios[oldfd]->type;
+
+	if ((pio->handle = dup_handle(oldfd)) == 0)
+		return -1;
+	if (pio->type == SOCK_FD) 
+		pio->internal.state = SOCK_READY;
+	
+	fd_table_set(pio, newfd);
+	return 0;
 }
 
 HANDLE
 w32_fd_to_handle(int fd)
 {
-	HANDLE h = fd_table.w32_ios[fd]->handle;
-	if (fd <= STDERR_FILENO)
-		h = GetStdHandle(fd_table.w32_ios[fd]->std_handle);
-	return h;
+	return fd_table.w32_ios[fd]->handle;
 }
-
-int 
-w32_allocate_fd_for_handle(HANDLE h, BOOL is_sock)
-{
-	int min_index = fd_table_get_min_index();
-	struct w32_io* pio;
-
-	if (min_index == -1) {
-		return -1;
-	}
-
-	pio = malloc(sizeof(struct w32_io));
-	if (pio == NULL) {
-		errno = ENOMEM;
-		return -1;
-	}
-	memset(pio, 0, sizeof(struct w32_io));
-
-	pio->type = is_sock ? SOCK_FD : NONSOCK_FD;
-	pio->handle = h;
-
-	/* TODO - get socket state and confirm that its connected */
-	pio->internal.state = SOCK_READY;
-	fd_table_set(pio, min_index);
-	return min_index;
-}
-
 
 int
 w32_ftruncate(int fd, off_t length)
@@ -911,19 +1011,14 @@ w32_fsync(int fd)
 	return FlushFileBuffers(w32_fd_to_handle(fd));
 }
 
+int fork() 
+{ 
+	error("fork is not supported"); 
+	return -1;
+}
 
-/*
-* spawn a child process
-* - specified by cmd with agruments argv
-* - with std handles set to in, out, err
-* - flags are passed to CreateProcess call
-*
-* cmd will be internally decoarated with a set of '"'
-* to account for any spaces within the commandline
-* this decoration is done only when additional arguments are passed in argv
-*/
-int
-spawn_child(char* cmd, char** argv, int in, int out, int err, unsigned long flags)
+static int
+spawn_child_internal(char* cmd, char** argv, HANDLE in, HANDLE out, HANDLE err, unsigned long flags)
 {
 	PROCESS_INFORMATION pi;
 	STARTUPINFOW si;
@@ -999,22 +1094,19 @@ spawn_child(char* cmd, char** argv, int in, int out, int err, unsigned long flag
 
 	memset(&si, 0, sizeof(STARTUPINFOW));
 	si.cb = sizeof(STARTUPINFOW);
-	si.hStdInput = w32_fd_to_handle(in);
-	si.hStdOutput = w32_fd_to_handle(out);
-	si.hStdError = w32_fd_to_handle(err);
+	si.hStdInput = in;
+	si.hStdOutput = out;
+	si.hStdError = err;
 	si.dwFlags = STARTF_USESTDHANDLES;
 
+	HANDLE tok1, tok2;
+	OpenThreadToken(GetCurrentThread(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, TRUE, &tok1);
+	DuplicateTokenEx(tok1, TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, NULL, SecurityImpersonation, TokenPrimary, &tok2);
 	debug3("spawning %ls", cmdline_utf16);
-	if (fd_table.w32_ios[in]->type != NONSOCK_SYNC_FD)
-		_putenv_s(SSH_ASYNC_STDIN, "1");
-	if (fd_table.w32_ios[out]->type != NONSOCK_SYNC_FD)
-		_putenv_s(SSH_ASYNC_STDOUT, "1");
-	if (fd_table.w32_ios[err]->type != NONSOCK_SYNC_FD)
-		_putenv_s(SSH_ASYNC_STDERR, "1");
-	b = CreateProcessW(NULL, cmdline_utf16, NULL, NULL, TRUE, flags, NULL, NULL, &si, &pi);
-	_putenv_s(SSH_ASYNC_STDIN, "");
-	_putenv_s(SSH_ASYNC_STDOUT, "");
-	_putenv_s(SSH_ASYNC_STDERR, "");
+
+	b = CreateProcessAsUserW(tok2, NULL, cmdline_utf16, NULL, NULL, TRUE, flags, NULL, NULL, &si, &pi);
+	CloseHandle(tok1);
+	CloseHandle(tok2);
 
 	if (b) {
 		if (register_child(pi.hProcess, pi.dwProcessId) == -1) {
@@ -1036,5 +1128,94 @@ cleanup:
 	if (cmdline_utf16)
 		free(cmdline_utf16);
 
+	return ret;
+}
+
+/*
+* spawn a child process
+* - specified by cmd with agruments argv
+* - with std handles set to in, out, err
+* - flags are passed to CreateProcess call
+*
+* cmd will be internally decoarated with a set of '"'
+* to account for any spaces within the commandline
+* this decoration is done only when additional arguments are passed in argv
+*/
+int
+spawn_child(char* cmd, char** argv, int in, int out, int err, unsigned long flags) 
+{
+	HANDLE h_in = w32_fd_to_handle(in);
+	HANDLE h_out = w32_fd_to_handle(in);
+	HANDLE h_err = w32_fd_to_handle(in);
+	return spawn_child_internal(cmd, argv, h_in, h_out, h_err, flags);
+}
+
+#include "inc\spawn.h"
+int
+posix_spawn(pid_t *pidp, const char *path, const posix_spawn_file_actions_t *file_actions, const posix_spawnattr_t *attrp, char *const argv[], char *const envp[])
+{
+	int i, ret = -1;
+	int sc_flags = 0;
+	char* fd_info = NULL;
+	HANDLE aux_handles[MAX_INHERITED_FDS];
+	HANDLE stdio_handles[STDERR_FILENO];
+	if (file_actions == NULL || envp) {
+		errno = ENOTSUP;
+		return -1;
+	}
+
+	if (!attrp || attrp->flags == POSIX_SPAWN_SETPGROUP)
+		sc_flags = CREATE_NEW_PROCESS_GROUP;
+
+	/* prepare handles */
+	memset(stdio_handles, 0, sizeof(stdio_handles));
+	memset(aux_handles, 0, sizeof(aux_handles));
+	stdio_handles[STDIN_FILENO] = dup_handle(file_actions->stdio_redirect[STDIN_FILENO]);
+	stdio_handles[STDOUT_FILENO] = dup_handle(file_actions->stdio_redirect[STDOUT_FILENO]);
+	stdio_handles[STDERR_FILENO] = dup_handle(file_actions->stdio_redirect[STDERR_FILENO]);
+	if (!stdio_handles[STDIN_FILENO] || !stdio_handles[STDOUT_FILENO] || !stdio_handles[STDERR_FILENO]) {
+		errno = ENOMEM;
+		goto cleanup;
+	}
+	for (i = 0; i < file_actions->num_aux_fds; i++) {
+		aux_handles[i] = dup_handle(fd_table.w32_ios[file_actions->aux_fds_info.parent_fd[i]]->handle,
+				fd_table.w32_ios[file_actions->aux_fds_info.parent_fd[i]]->type == SOCK_FD);
+		if (aux_handles[i] == NULL) {
+			errno = ENOMEM;
+			goto cleanup;
+		} 
+	}
+
+	/* set fd info */
+	if ((fd_info = fd_encode_state(file_actions->stdio_redirect[STDIN_FILENO],
+					file_actions->stdio_redirect[STDOUT_FILENO],
+					file_actions->stdio_redirect[STDERR_FILENO],
+					file_actions->num_aux_fds,
+					file_actions->aux_fds_info.parent_fd,
+					file_actions->aux_fds_info.child_fd,
+					aux_handles)) == NULL)
+		goto cleanup;
+
+	if (_putenv_s(POSIX_STATE_ENV, fd_info) != 0)
+		goto cleanup;
+	i = spawn_child(argv[0], argv + 1, file_actions->stdio_redirect[0], file_actions->stdio_redirect[1], file_actions->stdio_redirect[2], sc_flags);
+	if (i == -1)
+		goto cleanup;
+	if (pidp)
+		*pidp = i;
+	ret = 0;
+cleanup:
+	_putenv_s(POSIX_STATE_ENV, "");
+	for (i = 0; i < STDERR_FILENO; i++) {
+		if (stdio_handles[i] != NULL)
+			CloseHandle(stdio_handles[i]);
+	}
+	for (i = 0; i < file_actions->num_aux_fds; i++) {
+		if (aux_handles[i] != NULL) 
+			CloseHandle(aux_handles[i]);
+	}
+	if (fd_info)
+		free(fd_info);
+	
 	return ret;
 }
