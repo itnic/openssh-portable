@@ -1099,14 +1099,19 @@ spawn_child_internal(char* cmd, char** argv, HANDLE in, HANDLE out, HANDLE err, 
 	si.hStdError = err;
 	si.dwFlags = STARTF_USESTDHANDLES;
 
-	HANDLE tok1, tok2;
+	HANDLE tok1 = 0, tok2 = 0;
 	OpenThreadToken(GetCurrentThread(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, TRUE, &tok1);
-	DuplicateTokenEx(tok1, TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, NULL, SecurityImpersonation, TokenPrimary, &tok2);
+	if (tok1) DuplicateTokenEx(tok1, TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, NULL, SecurityImpersonation, TokenPrimary, &tok2);
 	debug3("spawning %ls", cmdline_utf16);
-
-	b = CreateProcessAsUserW(tok2, NULL, cmdline_utf16, NULL, NULL, TRUE, flags, NULL, NULL, &si, &pi);
-	CloseHandle(tok1);
-	CloseHandle(tok2);
+	
+	if (tok2)
+		b = CreateProcessAsUserW(tok2, NULL, cmdline_utf16, NULL, NULL, TRUE, flags, NULL, NULL, &si, &pi);
+	else
+		b = CreateProcessW(NULL, cmdline_utf16, NULL, NULL, TRUE, flags, NULL, NULL, &si, &pi);
+	if (tok1)
+		CloseHandle(tok1);
+	if (tok2)
+		CloseHandle(tok2);
 
 	if (b) {
 		if (register_child(pi.hProcess, pi.dwProcessId) == -1) {
@@ -1145,8 +1150,8 @@ int
 spawn_child(char* cmd, char** argv, int in, int out, int err, unsigned long flags) 
 {
 	HANDLE h_in = w32_fd_to_handle(in);
-	HANDLE h_out = w32_fd_to_handle(in);
-	HANDLE h_err = w32_fd_to_handle(in);
+	HANDLE h_out = w32_fd_to_handle(out);
+	HANDLE h_err = w32_fd_to_handle(err);
 	return spawn_child_internal(cmd, argv, h_in, h_out, h_err, flags);
 }
 
@@ -1158,7 +1163,7 @@ posix_spawn(pid_t *pidp, const char *path, const posix_spawn_file_actions_t *fil
 	int sc_flags = 0;
 	char* fd_info = NULL;
 	HANDLE aux_handles[MAX_INHERITED_FDS];
-	HANDLE stdio_handles[STDERR_FILENO];
+	HANDLE stdio_handles[STDERR_FILENO + 1];
 	if (file_actions == NULL || envp) {
 		errno = ENOTSUP;
 		return -1;
@@ -1178,8 +1183,7 @@ posix_spawn(pid_t *pidp, const char *path, const posix_spawn_file_actions_t *fil
 		goto cleanup;
 	}
 	for (i = 0; i < file_actions->num_aux_fds; i++) {
-		aux_handles[i] = dup_handle(fd_table.w32_ios[file_actions->aux_fds_info.parent_fd[i]]->handle,
-				fd_table.w32_ios[file_actions->aux_fds_info.parent_fd[i]]->type == SOCK_FD);
+		aux_handles[i] = dup_handle(file_actions->aux_fds_info.parent_fd[i]);
 		if (aux_handles[i] == NULL) {
 			errno = ENOMEM;
 			goto cleanup;
@@ -1198,7 +1202,7 @@ posix_spawn(pid_t *pidp, const char *path, const posix_spawn_file_actions_t *fil
 
 	if (_putenv_s(POSIX_STATE_ENV, fd_info) != 0)
 		goto cleanup;
-	i = spawn_child(argv[0], argv + 1, file_actions->stdio_redirect[0], file_actions->stdio_redirect[1], file_actions->stdio_redirect[2], sc_flags);
+	i = spawn_child_internal(argv[0], argv + 1, stdio_handles[STDIN_FILENO], stdio_handles[STDOUT_FILENO], stdio_handles[STDERR_FILENO], sc_flags);
 	if (i == -1)
 		goto cleanup;
 	if (pidp)
@@ -1206,7 +1210,7 @@ posix_spawn(pid_t *pidp, const char *path, const posix_spawn_file_actions_t *fil
 	ret = 0;
 cleanup:
 	_putenv_s(POSIX_STATE_ENV, "");
-	for (i = 0; i < STDERR_FILENO; i++) {
+	for (i = 0; i <= STDERR_FILENO; i++) {
 		if (stdio_handles[i] != NULL)
 			CloseHandle(stdio_handles[i]);
 	}

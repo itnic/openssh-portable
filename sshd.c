@@ -184,8 +184,8 @@ int num_listen_socks = 0;
  * the client's version string, passed by sshd2 in compat mode. if != NULL,
  * sshd will skip the version-number exchange
  */
-char *client_version_string = NULL;
-char *server_version_string = NULL;
+char *client_version_string = "SSH-2.0-OpenSSH_7.6";
+char *server_version_string = "SSH-2.0-OpenSSH_7.6";
 
 /* Daemon's agent connection */
 int auth_sock = -1;
@@ -622,17 +622,19 @@ privsep_preauth(Authctxt *authctxt)
 			arg[1] = "-Y";
 			arg[2] = NULL;
 			{
-				HANDLE h;
+				//HANDLE h;
 				//create a token for sshd service account
 				//LogonUserA("sshduser", NULL, "password", LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &h);
 				//LogonUserExExWHelper("sshd", "nt service", SERVICE_ACCOUNT_PASSWORD, LOGON32_LOGON_SERVICE, LOGON32_PROVIDER_DEFAULT, NULL, &h, NULL, NULL, NULL, NULL);
-				ImpersonateLoggedOnUser(h);
+				//ImpersonateLoggedOnUser(h);
 			}
 			if (posix_spawn(&pid, "sshd -Y", &actions, &attributes, arg, NULL) != 0)
 				error("posix_spawn failed");
-			RevertToSelf();
+			//RevertToSelf();
 			posix_spawn_file_actions_destroy(&actions);
 		}
+		close(pmonitor->m_recvfd);
+		close(pmonitor->m_log_sendfd);
 		monitor_child_preauth(authctxt, pmonitor);
 		while (waitpid(pid, &status, 0) < 0) {
 			if (errno == EINTR)
@@ -1347,6 +1349,11 @@ server_accept_loop(int *sock_in, int *sock_out, int *newsock, int *config_s)
 				close(startup_p[1]);
 				continue;
 			}
+			fcntl(startup_p[0], F_SETFD, FD_CLOEXEC);
+			fcntl(startup_p[1], F_SETFD, FD_CLOEXEC);
+			fcntl(config_s[0], F_SETFD, FD_CLOEXEC);
+			fcntl(config_s[1], F_SETFD, FD_CLOEXEC);
+
 
 			for (j = 0; j < options.max_startups; j++)
 				if (startup_pipes[j] == -1) {
@@ -1388,25 +1395,21 @@ server_accept_loop(int *sock_in, int *sock_out, int *newsock, int *config_s)
 				posix_spawn_file_actions_t actions;
 				posix_spawnattr_t attributes;
 				if (posix_spawn_file_actions_init(&actions) != 0 ||
-					posix_spawn_file_actions_adddup2(&actions, startup_p[1], STDIN_FILENO) != 0 ||
+					posix_spawn_file_actions_adddup2(&actions, *newsock, STDIN_FILENO) != 0 ||
 					posix_spawn_file_actions_adddup2(&actions, *newsock, STDOUT_FILENO) != 0 ||
+					posix_spawn_file_actions_adddup2(&actions, startup_p[1], REEXEC_STARTUP_PIPE_FD) != 0 ||
+					posix_spawn_file_actions_adddup2(&actions, config_s[1], REEXEC_CONFIG_PASS_FD) != 0 ||
 					posix_spawnattr_init(&attributes) != 0 ||
 					posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP) != 0 ||
 					posix_spawnattr_setpgroup(&attributes, 0) != 0) {
 					error("posix_spawn initialization failed");
-				}
-				else {
+				} else {
 					if (posix_spawn(&pid, rexec_argv[0], &actions, &attributes, rexec_argv, NULL) != 0)
 						error("posix_spawn failed");
 					posix_spawn_file_actions_destroy(&actions);
 					posix_spawnattr_destroy(&attributes);
 				}
 
-				close(startup_p[1]);
-				close(*newsock);
-
-				if (rexec_flag)
-					send_rexec_state(startup_p[0], &cfg);
 			}
 #else
 			/*
@@ -1447,6 +1450,7 @@ server_accept_loop(int *sock_in, int *sock_out, int *newsock, int *config_s)
 			else
 				debug("Forked child %ld.", (long)pid);
 
+#endif /* fork unsupported */
 			close(startup_p[1]);
 
 			if (rexec_flag) {
@@ -1456,7 +1460,6 @@ server_accept_loop(int *sock_in, int *sock_out, int *newsock, int *config_s)
 			}
 			close(*newsock);
 
-#endif /* fork unsupported */
 			/*
 			 * Ensure that our random state differs
 			 * from that of the child
@@ -1908,7 +1911,8 @@ main(int ac, char **av)
 			keytype = pubkey->type;
 		} else if (key != NULL) {
 			keytype = key->type;
-		} else if ((is_authchild || is_unprivchild) && pubkey) { //do nothing /* TODO - remove this */
+		} else if ((is_authchild || is_unprivchild) && pubkey) { 
+			keytype = pubkey->type;//do nothing /* TODO - remove this */
 		} else {
 			error("Could not load host key: %s",
 			    options.host_key_files[i]);
@@ -2127,6 +2131,7 @@ main(int ac, char **av)
 		error("setsid: %.100s", strerror(errno));
 #endif
 
+#ifndef FORK_NOT_SUPPORTED
 	if (rexec_flag) {
 		int fd;
 
@@ -2165,7 +2170,7 @@ main(int ac, char **av)
 		debug("rexec cleanup in %d out %d newsock %d pipe %d sock %d",
 		    sock_in, sock_out, newsock, startup_pipe, config_s[0]);
 	}
-
+#endif
 	/* Executed child processes don't need these. */
 	fcntl(sock_out, F_SETFD, FD_CLOEXEC);
 	fcntl(sock_in, F_SETFD, FD_CLOEXEC);
