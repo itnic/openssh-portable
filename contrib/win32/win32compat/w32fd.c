@@ -920,8 +920,10 @@ dup_handle(int fd)
 		SOCKET dup_sock;
 		SOCKET sock = (SOCKET)h;
 		WSAPROTOCOL_INFOW info;
-		WSADuplicateSocketW(sock, GetCurrentProcessId(), &info);
+		int r = WSADuplicateSocketW(sock, GetCurrentProcessId(), &info);
+		r = WSAGetLastError();
 		dup_sock = WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &info, 0, 0);
+		r = WSAGetLastError();
 		ret = (HANDLE)dup_sock;
 	}
 	else {
@@ -1211,12 +1213,20 @@ posix_spawn(pid_t *pidp, const char *path, const posix_spawn_file_actions_t *fil
 cleanup:
 	_putenv_s(POSIX_STATE_ENV, "");
 	for (i = 0; i <= STDERR_FILENO; i++) {
-		if (stdio_handles[i] != NULL)
-			CloseHandle(stdio_handles[i]);
+		if (stdio_handles[i] != NULL) {
+			if (fd_table.w32_ios[file_actions->stdio_redirect[i]]->type == SOCK_FD)
+				closesocket((SOCKET)stdio_handles[i]);
+			else
+				CloseHandle(stdio_handles[i]);
+		}
 	}
 	for (i = 0; i < file_actions->num_aux_fds; i++) {
-		if (aux_handles[i] != NULL) 
-			CloseHandle(aux_handles[i]);
+		if (aux_handles[i] != NULL) {
+			if (fd_table.w32_ios[file_actions->aux_fds_info.parent_fd[i]]->type == SOCK_FD)
+				closesocket((SOCKET)aux_handles[i]);
+			else
+				CloseHandle(aux_handles[i]);
+		}
 	}
 	if (fd_info)
 		free(fd_info);
