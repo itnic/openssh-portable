@@ -584,6 +584,7 @@ privsep_preauth(Authctxt *authctxt)
 	/* Store a pointer to the kex for later rekeying */
 	pmonitor->m_pkex = &active_state->kex;
 
+#define UNPRIV_LOG_FD STDERR_FILENO + 1
 #ifdef FORK_NOT_SUPPORTED
 	if (is_authchild)
 		return 1;
@@ -594,7 +595,7 @@ privsep_preauth(Authctxt *authctxt)
 		close(pmonitor->m_log_sendfd);
 
 		pmonitor->m_recvfd = dup(STDIN_FILENO);
-		pmonitor->m_log_sendfd = dup(STDERR_FILENO);
+		pmonitor->m_log_sendfd = UNPRIV_LOG_FD;
 
 		/* Arrange for logging to be sent to the monitor */
 		set_log_handler(mm_log_handler, pmonitor);
@@ -610,27 +611,16 @@ privsep_preauth(Authctxt *authctxt)
 		if (posix_spawn_file_actions_init(&actions) != 0 ||
 			posix_spawn_file_actions_adddup2(&actions, pmonitor->m_recvfd, STDIN_FILENO) != 0 ||
 			posix_spawn_file_actions_adddup2(&actions, tmp_sock, STDOUT_FILENO) != 0 ||
-			posix_spawn_file_actions_adddup2(&actions, pmonitor->m_log_sendfd, STDERR_FILENO) != 0 ||
+			posix_spawn_file_actions_adddup2(&actions, pmonitor->m_log_sendfd, UNPRIV_LOG_FD) != 0 ||
 			posix_spawnattr_init(&attributes) != 0 ||
 			posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP) != 0 ||
 			posix_spawnattr_setpgroup(&attributes, 0) != 0) {
 			error("posix_spawn initialization failed");
 		}
 		else {
-			char* arg[3];
-			arg[0] = "sshd.exe";
-			arg[1] = "-Y";
-			arg[2] = NULL;
-			{
-				//HANDLE h;
-				//create a token for sshd service account
-				//LogonUserA("sshduser", NULL, "password", LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &h);
-				//LogonUserExExWHelper("sshd", "nt service", SERVICE_ACCOUNT_PASSWORD, LOGON32_LOGON_SERVICE, LOGON32_PROVIDER_DEFAULT, NULL, &h, NULL, NULL, NULL, NULL);
-				//ImpersonateLoggedOnUser(h);
-			}
-			if (posix_spawn(&pid, "sshd -Y", &actions, &attributes, arg, NULL) != 0)
+			rexec_argv[rexec_argc] = "-Y";
+			if (posix_spawn(&pid, rexec_argv[0], &actions, &attributes, rexec_argv, NULL) != 0)
 				error("posix_spawn failed");
-			//RevertToSelf();
 			posix_spawn_file_actions_destroy(&actions);
 		}
 		close(pmonitor->m_recvfd);
@@ -708,15 +698,15 @@ privsep_preauth(Authctxt *authctxt)
 static void
 privsep_postauth(Authctxt *authctxt)
 {
-#ifdef DISABLE_FD_PASSING
-	if (1) {
-#else
-	if (authctxt->pw->pw_uid == 0) {
-#endif
-		/* File descriptor passing is broken or root login */
-		use_privsep = 0;
-		goto skip;
-	}
+//#ifdef DISABLE_FD_PASSING
+//	if (1) {
+//#else
+//	if (authctxt->pw->pw_uid == 0) {
+//#endif
+//		/* File descriptor passing is broken or root login */
+//		use_privsep = 0;
+//		goto skip;
+//	}
 
 	/* New socket pair */
 	monitor_reinit(pmonitor);
@@ -734,12 +724,9 @@ privsep_postauth(Authctxt *authctxt)
 			posix_spawnattr_setpgroup(&attributes, 0) != 0) {
 			error("posix_spawn initialization failed");
 		} else {
-			char* arg[3];
-			arg[0] = "sshd.exe";
-			arg[1] = "-Z";
-			arg[2] = NULL;
+			rexec_argv[rexec_argc] = "-Z";
 			ImpersonateLoggedOnUser(authctxt->auth_token);
-			if (posix_spawn(&pmonitor->m_pid, "sshd -Z", &actions, &attributes, arg, NULL) != 0)
+			if (posix_spawn(&pmonitor->m_pid, rexec_argv[0], &actions, &attributes, rexec_argv, NULL) != 0)
 				error("posix_spawn failed");
 			RevertToSelf();
 			posix_spawn_file_actions_destroy(&actions);
@@ -1621,11 +1608,11 @@ main(int ac, char **av)
 		switch (opt) {
 		case 'Y':
 			is_unprivchild = 1;
-			Sleep(10 * 1000);
+			//Sleep(10 * 1000);
 			break;
 		case 'Z':
 			is_authchild = 1;
-			Sleep(10 * 1000);
+			//Sleep(10 * 1000);
 			break;
 		case '4':
 			options.address_family = AF_INET;
@@ -1743,6 +1730,8 @@ main(int ac, char **av)
 		fatal("sshd re-exec requires execution with an absolute path");
 	if (rexeced_flag)
 		closefrom(REEXEC_MIN_FREE_FD);
+	else if (is_unprivchild)
+		closefrom(UNPRIV_LOG_FD + 1);
 	else
 		closefrom(REEXEC_DEVCRYPTO_RESERVED_FD);
 
