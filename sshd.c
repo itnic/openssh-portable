@@ -620,6 +620,95 @@ recv_idexch_state(int fd)
 	buffer_free(&m);
 }
 
+static void
+send_hostkeys_state(int fd)
+{
+	struct sshbuf *m;
+	int i;
+	u_char *blob = NULL;
+	size_t blen = 0;
+
+	if ((m = sshbuf_new()) == NULL)
+		fatal("%s: sshbuf_new failed", __func__);
+	
+	sshbuf_put_u32(m, options.num_host_key_files);
+	for (i = 0; i < options.num_host_key_files; i++) {
+		if (blob) {
+			free(blob);
+			blob = NULL;
+		}
+		if (sensitive_data.host_pubkeys[i]) {
+			sshkey_to_blob(sensitive_data.host_pubkeys[i], &blob, &blen);
+			sshbuf_put_string(m, blob, blen);
+		}
+		else
+			sshbuf_put_string(m, NULL, 0);		
+	}
+
+	for (i = 0; i < options.num_host_key_files; i++) {
+		if (blob) {
+			free(blob);
+			blob = NULL;
+		}
+		if (sensitive_data.host_certificates[i]) {
+			sshkey_to_blob(sensitive_data.host_certificates[i], &blob, &blen);
+			sshbuf_put_string(m, blob, blen);
+		}
+		else
+			sshbuf_put_string(m, NULL, 0);
+	}
+
+	if (ssh_msg_send(fd, 0, m) == -1)
+		fatal("%s: ssh_msg_send failed", __func__);
+
+	if (blob)
+		free(blob);
+	sshbuf_free(m);
+}
+
+static void
+recv_hostkeys_state(int fd)
+{
+	Buffer b, *m = &b;
+	char *cp;
+	struct sshkey *key = NULL;
+	char *blob;
+	int blen;
+
+	buffer_init(m);
+
+	if (ssh_msg_recv(fd, m) == -1)
+		fatal("%s: ssh_msg_recv failed", __func__);
+
+	if (buffer_get_char(m) != 0)
+		fatal("%s: recv_hostkeys_state version mismatch", __func__);
+
+	int num = buffer_get_int(m);
+	sensitive_data.host_keys = xcalloc(num, sizeof(struct sshkey *));
+	sensitive_data.host_pubkeys = xcalloc(num, sizeof(struct sshkey *));
+	sensitive_data.host_certificates = xcalloc(num, sizeof(struct sshkey *));
+	for (int i = 0; i < num; i++) {
+		blob = buffer_get_string_ptr(m, &blen);
+		sensitive_data.host_pubkeys[i] = NULL;
+		sensitive_data.host_keys[i] = NULL;
+
+		if (blen) {
+			sshkey_from_blob(blob, blen, &key);
+			sensitive_data.host_pubkeys[i] = key;
+		}
+	}
+	for (int i = 0; i < num; i++) {
+		blob = buffer_get_string_ptr(m, &blen);
+		sensitive_data.host_certificates[i] = NULL;
+		if (blen) {
+			sshkey_from_blob(blob, blen, &key);
+			sensitive_data.host_certificates[i] = key;
+		}
+	}
+
+	buffer_free(m);
+}
+
 static int
 privsep_preauth(Authctxt *authctxt)
 {
@@ -674,6 +763,7 @@ privsep_preauth(Authctxt *authctxt)
 		close(pmonitor->m_recvfd);
 		close(pmonitor->m_log_sendfd);
 		send_rexec_state(pmonitor->m_sendfd, &cfg);
+		send_hostkeys_state(pmonitor->m_sendfd);
 		send_idexch_state(pmonitor->m_sendfd);
 		monitor_child_preauth(authctxt, pmonitor);
 		while (waitpid(pid, &status, 0) < 0) {
@@ -784,6 +874,7 @@ privsep_postauth(Authctxt *authctxt)
 		}
 		
 		send_rexec_state(pmonitor->m_sendfd, &cfg);
+		send_hostkeys_state(pmonitor->m_sendfd);
 		send_idexch_state(pmonitor->m_sendfd);
 		monitor_send_keystate(pmonitor);
 		monitor_clear_keystate(pmonitor);
@@ -1914,6 +2005,11 @@ main(int ac, char **av)
 	}
 	endpwent();
 #endif /* !WINDOWS */
+	
+	if (privsep_auth_child || privsep_unauth_child) {
+		recv_hostkeys_state(PRIVSEP_MONITOR_FD);
+		goto done_loading_hostkeys;
+	}
 
 	/* load host keys */
 	sensitive_data.host_keys = xcalloc(options.num_host_key_files,
@@ -2024,7 +2120,7 @@ main(int ac, char **av)
 		debug("host certificate: #%u type %d %s", j, key->type,
 		    key_type(key));
 	}
-
+done_loading_hostkeys:
 	if (privsep_chroot) {
 		struct stat st;
 
