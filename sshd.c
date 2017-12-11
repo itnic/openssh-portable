@@ -129,6 +129,12 @@
 #define REEXEC_CONFIG_PASS_FD		(STDERR_FILENO + 3)
 #define REEXEC_MIN_FREE_FD		(STDERR_FILENO + 4)
 
+/* Privilege separation related spawn fds */
+#define PRIVSEP_MONITOR_FD		(STDERR_FILENO + 1)
+#define PRIVSEP_LOG_FD			(STDERR_FILENO + 2)
+#define PRIVSEP_UNAUTH_MIN_FREE_FD	(PRIVSEP_LOG_FD + 1)
+#define PRIVSEP_AUTH_MIN_FREE_FD	(PRIVSEP_MONITOR_FD + 1)
+
 extern char *__progname;
 
 /* Server configuration options. */
@@ -191,8 +197,8 @@ char *server_version_string = "SSH-2.0-OpenSSH_7.6";
 int auth_sock = -1;
 int have_agent = 0;
 
-int is_unprivchild = 0;
-int is_authchild = 0;
+int privsep_unauth_child = 0;
+int privsep_auth_child = 0;
 int tmp_sock = 0;
 
 /*
@@ -572,6 +578,9 @@ privsep_preauth_child(void)
 	}
 }
 
+static void
+send_rexec_state(int fd, struct sshbuf *conf);
+
 static int
 privsep_preauth(Authctxt *authctxt)
 {
@@ -584,18 +593,17 @@ privsep_preauth(Authctxt *authctxt)
 	/* Store a pointer to the kex for later rekeying */
 	pmonitor->m_pkex = &active_state->kex;
 
-#define UNPRIV_LOG_FD STDERR_FILENO + 1
 #ifdef FORK_NOT_SUPPORTED
-	if (is_authchild)
+	if (privsep_auth_child)
 		return 1;
-	else if (is_unprivchild) {
+	else if (privsep_unauth_child) {
 		close(pmonitor->m_sendfd);
 		close(pmonitor->m_log_recvfd);
 		close(pmonitor->m_recvfd);
 		close(pmonitor->m_log_sendfd);
 
-		pmonitor->m_recvfd = dup(STDIN_FILENO);
-		pmonitor->m_log_sendfd = UNPRIV_LOG_FD;
+		pmonitor->m_recvfd = PRIVSEP_MONITOR_FD;
+		pmonitor->m_log_sendfd = PRIVSEP_LOG_FD;
 
 		/* Arrange for logging to be sent to the monitor */
 		set_log_handler(mm_log_handler, pmonitor);
@@ -609,22 +617,24 @@ privsep_preauth(Authctxt *authctxt)
 		posix_spawnattr_t attributes;
 
 		if (posix_spawn_file_actions_init(&actions) != 0 ||
-			posix_spawn_file_actions_adddup2(&actions, pmonitor->m_recvfd, STDIN_FILENO) != 0 ||
+			posix_spawn_file_actions_adddup2(&actions, tmp_sock, STDIN_FILENO) != 0 ||
 			posix_spawn_file_actions_adddup2(&actions, tmp_sock, STDOUT_FILENO) != 0 ||
-			posix_spawn_file_actions_adddup2(&actions, pmonitor->m_log_sendfd, UNPRIV_LOG_FD) != 0 ||
+			posix_spawn_file_actions_adddup2(&actions, pmonitor->m_recvfd, PRIVSEP_MONITOR_FD) != 0 ||
+			posix_spawn_file_actions_adddup2(&actions, pmonitor->m_log_sendfd, PRIVSEP_LOG_FD) != 0 ||
 			posix_spawnattr_init(&attributes) != 0 ||
 			posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP) != 0 ||
 			posix_spawnattr_setpgroup(&attributes, 0) != 0) {
 			error("posix_spawn initialization failed");
 		}
 		else {
-			rexec_argv[rexec_argc] = "-Y";
+			rexec_argv[rexec_argc] = "-y";
 			if (posix_spawn(&pid, rexec_argv[0], &actions, &attributes, rexec_argv, NULL) != 0)
 				error("posix_spawn failed");
 			posix_spawn_file_actions_destroy(&actions);
 		}
 		close(pmonitor->m_recvfd);
 		close(pmonitor->m_log_sendfd);
+		send_rexec_state(pmonitor->m_sendfd, &cfg);
 		monitor_child_preauth(authctxt, pmonitor);
 		while (waitpid(pid, &status, 0) < 0) {
 			if (errno == EINTR)
@@ -712,26 +722,28 @@ privsep_postauth(Authctxt *authctxt)
 	monitor_reinit(pmonitor);
 
 #ifdef FORK_NOT_SUPPORTED
-	if (!is_authchild) { /* parent */
+	if (!privsep_auth_child) { /* parent */
 		posix_spawn_file_actions_t actions;
 		posix_spawnattr_t attributes;
 
 		if (posix_spawn_file_actions_init(&actions) != 0 ||
-			posix_spawn_file_actions_adddup2(&actions, pmonitor->m_recvfd, STDIN_FILENO) != 0 ||
+			posix_spawn_file_actions_adddup2(&actions, tmp_sock, STDIN_FILENO) != 0 ||
 			posix_spawn_file_actions_adddup2(&actions, tmp_sock, STDOUT_FILENO) != 0 ||
+			posix_spawn_file_actions_adddup2(&actions, pmonitor->m_recvfd, PRIVSEP_MONITOR_FD) != 0 ||
 			posix_spawnattr_init(&attributes) != 0 ||
 			posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP) != 0 ||
 			posix_spawnattr_setpgroup(&attributes, 0) != 0) {
 			error("posix_spawn initialization failed");
 		} else {
-			rexec_argv[rexec_argc] = "-Z";
+			rexec_argv[rexec_argc] = "-z";
 			ImpersonateLoggedOnUser(authctxt->auth_token);
 			if (posix_spawn(&pmonitor->m_pid, rexec_argv[0], &actions, &attributes, rexec_argv, NULL) != 0)
 				error("posix_spawn failed");
 			RevertToSelf();
 			posix_spawn_file_actions_destroy(&actions);
 		}
-
+		
+		send_rexec_state(pmonitor->m_sendfd, &cfg);
 		monitor_send_keystate(pmonitor);
 		monitor_clear_keystate(pmonitor);
 		monitor_child_postauth(pmonitor);
@@ -742,7 +754,7 @@ privsep_postauth(Authctxt *authctxt)
 	close(pmonitor->m_sendfd);
 	close(pmonitor->m_recvfd);
 
-	pmonitor->m_recvfd = dup(STDIN_FILENO);
+	pmonitor->m_recvfd = PRIVSEP_MONITOR_FD;
 	authctxt->pw = w32_getpwuid(1);
 	authctxt->valid = 1;
 
@@ -1604,16 +1616,8 @@ main(int ac, char **av)
 
 	/* Parse command-line arguments. */
 	while ((opt = getopt(ac, av,
-	    "C:E:b:c:f:g:h:k:o:p:u:46DQRTdeiqrtYZ")) != -1) {
+	    "C:E:b:c:f:g:h:k:o:p:u:46DQRTdeiqrtyz")) != -1) {
 		switch (opt) {
-		case 'Y':
-			is_unprivchild = 1;
-			//Sleep(10 * 1000);
-			break;
-		case 'Z':
-			is_authchild = 1;
-			//Sleep(10 * 1000);
-			break;
 		case '4':
 			options.address_family = AF_INET;
 			break;
@@ -1713,6 +1717,16 @@ main(int ac, char **av)
 				exit(1);
 			free(line);
 			break;
+		case 'y':
+			privsep_unauth_child = 1;
+			rexec_flag = 0;
+			//Sleep(10 * 1000);
+			break;
+		case 'z':
+			privsep_auth_child = 1;
+			rexec_flag = 0;
+			//Sleep(10 * 1000);
+			break;
 		case '?':
 		default:
 			usage();
@@ -1730,8 +1744,10 @@ main(int ac, char **av)
 		fatal("sshd re-exec requires execution with an absolute path");
 	if (rexeced_flag)
 		closefrom(REEXEC_MIN_FREE_FD);
-	else if (is_unprivchild)
-		closefrom(UNPRIV_LOG_FD + 1);
+	else if (privsep_unauth_child)
+		closefrom(PRIVSEP_UNAUTH_MIN_FREE_FD);
+	else if (privsep_auth_child)
+		closefrom(PRIVSEP_AUTH_MIN_FREE_FD);
 	else
 		closefrom(REEXEC_DEVCRYPTO_RESERVED_FD);
 
@@ -1781,6 +1797,8 @@ main(int ac, char **av)
 	buffer_init(&cfg);
 	if (rexeced_flag)
 		recv_rexec_state(REEXEC_CONFIG_PASS_FD, &cfg);
+	else if (privsep_unauth_child || privsep_auth_child)
+		recv_rexec_state(PRIVSEP_MONITOR_FD, &cfg);
 	else if (strcasecmp(config_file_name, "none") != 0)
 		load_server_config(config_file_name, &cfg);
 
@@ -1885,7 +1903,7 @@ main(int ac, char **av)
 	for (i = 0; i < options.num_host_key_files; i++) {
 		if (options.host_key_files[i] == NULL)
 			continue;
-		if (is_unprivchild || is_authchild) key = NULL; else /*TODO - remove this*/
+		if (privsep_unauth_child || privsep_auth_child) key = NULL; else /*TODO - remove this*/
 		key = key_load_private(options.host_key_files[i], "", NULL);
 		pubkey = key_load_public(options.host_key_files[i], NULL);
 
@@ -1900,7 +1918,7 @@ main(int ac, char **av)
 			keytype = pubkey->type;
 		} else if (key != NULL) {
 			keytype = key->type;
-		} else if ((is_authchild || is_unprivchild) && pubkey) { 
+		} else if ((privsep_auth_child || privsep_unauth_child) && pubkey) { 
 			keytype = pubkey->type;//do nothing /* TODO - remove this */
 		} else {
 			error("Could not load host key: %s",
@@ -1926,7 +1944,7 @@ main(int ac, char **av)
 		    key ? "private" : "agent", i, sshkey_ssh_name(pubkey), fp);
 		free(fp);
 	}
-	if (is_authchild || is_unprivchild) {/* TODO removee this */} else
+	if (privsep_auth_child || privsep_unauth_child) {/* TODO removee this */} else
 	if (!sensitive_data.have_ssh2_key) {
 		logit("sshd: no hostkeys available -- exiting.");
 		exit(1);
@@ -2065,13 +2083,13 @@ main(int ac, char **av)
 	signal(SIGPIPE, SIG_IGN);
 
 	/* Get a connection, either from inetd or a listening TCP socket */
-	if (is_unprivchild || is_authchild) {
-		sock_in = sock_out = dup(STDOUT_FILENO);
-		close(STDOUT_FILENO);
-		startup_pipe = -1;
-	} else
 	if (inetd_flag) {
 		server_accept_inetd(&sock_in, &sock_out);
+	} else if (privsep_unauth_child || privsep_auth_child) {
+		sock_in = sock_out = dup(STDIN_FILENO);
+		close(STDIN_FILENO);
+		close(STDOUT_FILENO);
+		startup_pipe = -1;
 	} else {
 		platform_pre_listen();
 		server_listen();
@@ -2236,7 +2254,7 @@ main(int ac, char **av)
 	 * mode; it is just annoying to have the server exit just when you
 	 * are about to discover the bug.
 	 */
-	if (!is_unprivchild && !is_authchild) {
+	if (!privsep_unauth_child && !privsep_auth_child) {
 	signal(SIGALRM, grace_alarm_handler);
 	if (!debug_flag)
 		alarm(options.login_grace_time);
