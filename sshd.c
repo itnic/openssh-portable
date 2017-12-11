@@ -190,8 +190,8 @@ int num_listen_socks = 0;
  * the client's version string, passed by sshd2 in compat mode. if != NULL,
  * sshd will skip the version-number exchange
  */
-char *client_version_string = "SSH-2.0-OpenSSH_7.6";
-char *server_version_string = "SSH-2.0-OpenSSH_7.6";
+char *client_version_string = NULL;
+char *server_version_string = NULL;
 
 /* Daemon's agent connection */
 int auth_sock = -1;
@@ -581,6 +581,45 @@ privsep_preauth_child(void)
 static void
 send_rexec_state(int fd, struct sshbuf *conf);
 
+static void
+send_idexch_state(int fd)
+{
+	struct sshbuf *m;
+
+	if ((m = sshbuf_new()) == NULL)
+		fatal("%s: sshbuf_new failed", __func__);
+	if (sshbuf_put_cstring(m, client_version_string) != 0 ||
+	    sshbuf_put_cstring(m, server_version_string) != 0)
+		fatal("%s: buffer error", __func__);
+
+	if (ssh_msg_send(fd, 0, m) == -1)
+		fatal("%s: ssh_msg_send failed", __func__);
+
+	sshbuf_free(m);
+}
+
+static void
+recv_idexch_state(int fd)
+{
+	Buffer m;
+	char *cp;
+	size_t tmp;
+	
+	buffer_init(&m);
+
+	if (ssh_msg_recv(fd, &m) == -1)
+		fatal("%s: ssh_msg_recv failed", __func__);
+
+	if (buffer_get_char(&m) != 0)
+		fatal("%s: recv_idexch_state version mismatch", __func__);
+
+	if (sshbuf_get_cstring(&m, &client_version_string, &tmp) != 0 ||
+	    sshbuf_get_cstring(&m, &server_version_string, &tmp) != 0 )
+		fatal("%s: unable to retrieve idexch state", __func__);
+
+	buffer_free(&m);
+}
+
 static int
 privsep_preauth(Authctxt *authctxt)
 {
@@ -635,6 +674,7 @@ privsep_preauth(Authctxt *authctxt)
 		close(pmonitor->m_recvfd);
 		close(pmonitor->m_log_sendfd);
 		send_rexec_state(pmonitor->m_sendfd, &cfg);
+		send_idexch_state(pmonitor->m_sendfd);
 		monitor_child_preauth(authctxt, pmonitor);
 		while (waitpid(pid, &status, 0) < 0) {
 			if (errno == EINTR)
@@ -744,6 +784,7 @@ privsep_postauth(Authctxt *authctxt)
 		}
 		
 		send_rexec_state(pmonitor->m_sendfd, &cfg);
+		send_idexch_state(pmonitor->m_sendfd);
 		monitor_send_keystate(pmonitor);
 		monitor_clear_keystate(pmonitor);
 		monitor_child_postauth(pmonitor);
@@ -1810,15 +1851,6 @@ main(int ac, char **av)
 	/* Fill in default values for those options not explicitly set. */
 	fill_default_server_options(&options);
 
-#ifdef WINDOWS
-	/*
-	 * For windows, enable logging right away to capture failures while loading private host keys.
-	 * On Unix, logging at configured level is not done until private host keys are loaded. Why??
-	 */
-	if (!debug_flag)
-		log_init(__progname, options.log_level, options.log_facility, log_stderr);
-#endif // WINDOWS
-
 	/* challenge-response is implemented via keyboard interactive */
 	if (options.challenge_response_authentication)
 		options.kbd_interactive_authentication = 1;
@@ -2237,6 +2269,10 @@ main(int ac, char **av)
 
 	rdomain = ssh_packet_rdomain_in(ssh);
 
+	if (privsep_unauth_child || privsep_auth_child) {
+		recv_idexch_state(PRIVSEP_MONITOR_FD);
+		goto idexch_done;
+	}
 	/* Log the connection. */
 	laddr = get_local_ipaddr(sock_in);
 	verbose("Connection from %s port %d on %s port %d%s%s%s",
@@ -2254,13 +2290,12 @@ main(int ac, char **av)
 	 * mode; it is just annoying to have the server exit just when you
 	 * are about to discover the bug.
 	 */
-	if (!privsep_unauth_child && !privsep_auth_child) {
 	signal(SIGALRM, grace_alarm_handler);
 	if (!debug_flag)
 		alarm(options.login_grace_time);
 
 	sshd_exchange_identification(ssh, sock_in, sock_out);
-	}
+idexch_done:
 	packet_set_nonblocking();
 
 	/* allocate authentication context */
