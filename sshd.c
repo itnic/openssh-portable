@@ -709,6 +709,19 @@ recv_hostkeys_state(int fd)
 	buffer_free(m);
 }
 
+static char**
+privsep_child_cmdline(int authenticated)
+{
+	char** argv = rexec_argv ? rexec_argv : saved_argv;
+	int argc = rexec_argv ? rexec_argc : saved_argc - 1;
+	if (authenticated)
+		argv[argc] = "-z";
+	else
+		argv[argc] = "-y";
+
+	return argv;
+}
+
 static int
 privsep_preauth(Authctxt *authctxt)
 {
@@ -755,8 +768,8 @@ privsep_preauth(Authctxt *authctxt)
 			error("posix_spawn initialization failed");
 		}
 		else {
-			rexec_argv[rexec_argc] = "-y";
-			if (posix_spawn(&pid, rexec_argv[0], &actions, &attributes, rexec_argv, NULL) != 0)
+			char** argv = privsep_child_cmdline(0);
+			if (posix_spawn(&pid, argv[0], &actions, &attributes, argv, NULL) != 0)
 				error("posix_spawn failed");
 			posix_spawn_file_actions_destroy(&actions);
 		}
@@ -865,9 +878,9 @@ privsep_postauth(Authctxt *authctxt)
 			posix_spawnattr_setpgroup(&attributes, 0) != 0) {
 			error("posix_spawn initialization failed");
 		} else {
-			rexec_argv[rexec_argc] = "-z";
+			char** argv = privsep_child_cmdline(1);
 			ImpersonateLoggedOnUser(authctxt->auth_token);
-			if (posix_spawn(&pmonitor->m_pid, rexec_argv[0], &actions, &attributes, rexec_argv, NULL) != 0)
+			if (posix_spawn(&pmonitor->m_pid, argv[0], &actions, &attributes, argv, NULL) != 0)
 				error("posix_spawn failed");
 			RevertToSelf();
 			posix_spawn_file_actions_destroy(&actions);
