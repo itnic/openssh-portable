@@ -64,6 +64,8 @@ int posix_spawnattr_getpgroup(const posix_spawnattr_t * attr, pid_t * pgroup);
 
 int posix_spawnattr_setpgroup(posix_spawnattr_t *attr, pid_t pgroup);
 
+void spawn_set_user(HANDLE user);
+
 
 
 

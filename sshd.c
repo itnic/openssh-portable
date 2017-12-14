@@ -769,9 +769,13 @@ privsep_preauth(Authctxt *authctxt)
 		}
 		else {
 			char** argv = privsep_child_cmdline(0);
+			HANDLE sshd_token;
+			LogonUserA("sshd", NULL, "Bull_dog1", LOGON32_LOGON_NETWORK, LOGON32_PROVIDER_DEFAULT, &sshd_token);
+			spawn_set_user(sshd_token);
 			if (posix_spawn(&pid, argv[0], &actions, &attributes, argv, NULL) != 0)
 				error("posix_spawn failed");
 			posix_spawn_file_actions_destroy(&actions);
+			CloseHandle(sshd_token);
 		}
 		close(pmonitor->m_recvfd);
 		close(pmonitor->m_log_sendfd);
@@ -879,10 +883,9 @@ privsep_postauth(Authctxt *authctxt)
 			error("posix_spawn initialization failed");
 		} else {
 			char** argv = privsep_child_cmdline(1);
-			ImpersonateLoggedOnUser(authctxt->auth_token);
+			spawn_set_user(authctxt->auth_token);
 			if (posix_spawn(&pmonitor->m_pid, argv[0], &actions, &attributes, argv, NULL) != 0)
 				error("posix_spawn failed");
-			RevertToSelf();
 			posix_spawn_file_actions_destroy(&actions);
 		}
 		

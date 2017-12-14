@@ -1019,6 +1019,8 @@ int fork()
 	return -1;
 }
 
+HANDLE spawn_user_token = NULL;
+
 static int
 spawn_child_internal(char* cmd, char** argv, HANDLE in, HANDLE out, HANDLE err, unsigned long flags)
 {
@@ -1101,19 +1103,12 @@ spawn_child_internal(char* cmd, char** argv, HANDLE in, HANDLE out, HANDLE err, 
 	si.hStdError = err;
 	si.dwFlags = STARTF_USESTDHANDLES;
 
-	HANDLE tok1 = 0, tok2 = 0;
-	OpenThreadToken(GetCurrentThread(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, TRUE, &tok1);
-	if (tok1) DuplicateTokenEx(tok1, TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, NULL, SecurityImpersonation, TokenPrimary, &tok2);
 	debug3("spawning %ls", cmdline_utf16);
 	
-	if (tok2)
-		b = CreateProcessAsUserW(tok2, NULL, cmdline_utf16, NULL, NULL, TRUE, flags, NULL, NULL, &si, &pi);
+	if (spawn_user_token)
+		b = CreateProcessAsUserW(spawn_user_token, NULL, cmdline_utf16, NULL, NULL, TRUE, flags, NULL, NULL, &si, &pi);
 	else
 		b = CreateProcessW(NULL, cmdline_utf16, NULL, NULL, TRUE, flags, NULL, NULL, &si, &pi);
-	if (tok1)
-		CloseHandle(tok1);
-	if (tok2)
-		CloseHandle(tok2);
 
 	if (b) {
 		if (register_child(pi.hProcess, pi.dwProcessId) == -1) {
